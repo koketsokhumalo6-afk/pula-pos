@@ -23,7 +23,16 @@ interface CartLine {
   discount: number;
 }
 
-const PAYMENT_METHODS = ["CASH", "CARD", "MOBILE_MONEY", "BANK_TRANSFER", "ACCOUNT"] as const;
+const PAYMENT_METHODS = [
+  "CASH",
+  "CARD",
+  "MOBILE_MONEY",
+  "ORANGE_MONEY",
+  "MYZAKA",
+  "SMEGA",
+  "BANK_TRANSFER",
+  "ACCOUNT",
+] as const;
 
 export function PosPage() {
   const { business } = useAuth();

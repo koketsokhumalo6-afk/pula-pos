@@ -11,6 +11,12 @@ interface Product {
   taxRate: string;
   quantity: string;
   imageUrl: string | null;
+  unit: string;
+}
+
+/** Renders a quantity with its unit, e.g. "12.5 kg" — bare units like "each" are omitted since they're implied. */
+function qtyLabel(qty: string | number, unit: string) {
+  return unit && unit !== "each" ? `${qty} ${unit}` : `${qty}`;
 }
 
 interface Customer {
@@ -144,7 +150,7 @@ export function PosPage() {
               )}
               <div className="name">{p.name}</div>
               <div className="price">{money(p.sellPrice, business?.currency)}</div>
-              <div className="stock">{Number(p.quantity) <= 0 ? "Out of stock" : `${p.quantity} in stock`}</div>
+              <div className="stock">{Number(p.quantity) <= 0 ? "Out of stock" : `${qtyLabel(p.quantity, p.unit)} in stock`}</div>
             </button>
           ))}
           {!products.length && <p className="muted">No products found.</p>}
@@ -156,15 +162,22 @@ export function PosPage() {
               <div className="cart-line" key={line.product.id}>
                 <div style={{ flex: 1 }}>
                   <div>{line.product.name}</div>
-                  <div className="muted">{money(line.product.sellPrice, business?.currency)} each</div>
+                  <div className="muted">
+                    {money(line.product.sellPrice, business?.currency)}
+                    {line.product.unit && line.product.unit !== "each" ? ` / ${line.product.unit}` : " each"}
+                  </div>
                 </div>
                 <input
                   type="number"
-                  min={1}
-                  style={{ width: 56 }}
+                  min={0.01}
+                  step="any"
+                  style={{ width: 64 }}
                   value={line.quantity}
-                  onChange={(e) => updateLine(line.product.id, { quantity: Math.max(1, Number(e.target.value)) })}
+                  onChange={(e) => updateLine(line.product.id, { quantity: Math.max(0.01, Number(e.target.value) || 0.01) })}
                 />
+                {line.product.unit && line.product.unit !== "each" && (
+                  <span className="muted" style={{ fontSize: 11.5, marginLeft: 4 }}>{line.product.unit}</span>
+                )}
                 <button className="btn btn-secondary btn-sm" onClick={() => removeLine(line.product.id)} style={{ marginLeft: 6 }}>
                   ✕
                 </button>

@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ChangeEvent } from "react";
 import { api, ApiRequestError } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { money } from "../lib/format";
+import { resizeImageToDataUrl } from "../lib/image";
 
 interface Product {
   id: string;
@@ -14,9 +15,10 @@ interface Product {
   taxRate: string;
   quantity: string;
   reorderLevel: string;
+  imageUrl: string | null;
 }
 
-const empty = { name: "", sku: "", barcode: "", category: "", costPrice: "", sellPrice: "", taxRate: "0", quantity: "0", reorderLevel: "0" };
+const empty = { name: "", sku: "", barcode: "", category: "", costPrice: "", sellPrice: "", taxRate: "0", quantity: "0", reorderLevel: "0", imageUrl: "" };
 
 export function ProductsPage() {
   const { business } = useAuth();
@@ -25,16 +27,32 @@ export function ProductsPage() {
   const [editing, setEditing] = useState<Product | null>(null);
   const [form, setForm] = useState(empty);
   const [error, setError] = useState<string | null>(null);
+  const [imageError, setImageError] = useState<string | null>(null);
 
   useEffect(() => { load(); }, []);
   function load() { api.get<Product[]>("/products").then(setProducts).catch(() => {}); }
 
-  function openNew() { setEditing(null); setForm(empty); setError(null); setShowForm(true); }
+  function openNew() { setEditing(null); setForm(empty); setError(null); setImageError(null); setShowForm(true); }
   function openEdit(p: Product) {
     setEditing(p);
-    setForm({ name: p.name, sku: p.sku || "", barcode: p.barcode || "", category: p.category || "", costPrice: p.costPrice, sellPrice: p.sellPrice, taxRate: p.taxRate, quantity: p.quantity, reorderLevel: p.reorderLevel });
+    setForm({ name: p.name, sku: p.sku || "", barcode: p.barcode || "", category: p.category || "", costPrice: p.costPrice, sellPrice: p.sellPrice, taxRate: p.taxRate, quantity: p.quantity, reorderLevel: p.reorderLevel, imageUrl: p.imageUrl || "" });
     setError(null);
+    setImageError(null);
     setShowForm(true);
+  }
+
+  async function onImageSelected(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImageError(null);
+    try {
+      const dataUrl = await resizeImageToDataUrl(file, 480, 0.72);
+      setForm((f) => ({ ...f, imageUrl: dataUrl }));
+    } catch {
+      setImageError("Couldn't read that image — try a different file.");
+    } finally {
+      e.target.value = "";
+    }
   }
 
   async function submit() {
@@ -50,6 +68,7 @@ export function ProductsPage() {
         taxRate: Number(form.taxRate) || 0,
         quantity: Number(form.quantity) || 0,
         reorderLevel: Number(form.reorderLevel) || 0,
+        imageUrl: form.imageUrl || undefined,
       };
       if (editing) await api.put(`/products/${editing.id}`, payload);
       else await api.post("/products", payload);
@@ -75,11 +94,18 @@ export function ProductsPage() {
       <div className="card">
         <table>
           <thead>
-            <tr><th>Name</th><th>SKU</th><th>Category</th><th>Price</th><th>Stock</th><th></th></tr>
+            <tr><th></th><th>Name</th><th>SKU</th><th>Category</th><th>Price</th><th>Stock</th><th></th></tr>
           </thead>
           <tbody>
             {products.map((p) => (
               <tr key={p.id}>
+                <td>
+                  {p.imageUrl ? (
+                    <img src={p.imageUrl} alt={p.name} className="thumb" />
+                  ) : (
+                    <div className="thumb thumb-placeholder">{p.name.charAt(0).toUpperCase()}</div>
+                  )}
+                </td>
                 <td>{p.name}</td>
                 <td>{p.sku || "—"}</td>
                 <td>{p.category || "—"}</td>
@@ -100,6 +126,27 @@ export function ProductsPage() {
         <div className="modal-overlay" onClick={() => setShowForm(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h3>{editing ? "Edit Product" : "New Product"}</h3>
+
+            <div className="field">
+              <label>Product photo</label>
+              <div className="gap-8" style={{ alignItems: "center" }}>
+                {form.imageUrl ? (
+                  <img src={form.imageUrl} alt="Preview" className="thumb thumb-lg" />
+                ) : (
+                  <div className="thumb thumb-lg thumb-placeholder">{form.name ? form.name.charAt(0).toUpperCase() : "?"}</div>
+                )}
+                <div>
+                  <input type="file" accept="image/*" onChange={onImageSelected} />
+                  {form.imageUrl && (
+                    <button type="button" className="btn btn-secondary btn-sm" style={{ marginTop: 6 }} onClick={() => setForm({ ...form, imageUrl: "" })}>
+                      Remove photo
+                    </button>
+                  )}
+                </div>
+              </div>
+              {imageError && <div className="error-text">{imageError}</div>}
+            </div>
+
             <div className="field"><label>Name *</label><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></div>
             <div className="grid grid-2">
               <div className="field"><label>SKU</label><input value={form.sku} onChange={(e) => setForm({ ...form, sku: e.target.value })} /></div>

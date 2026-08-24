@@ -20,6 +20,7 @@ import { shiftsRouter } from "./routes/shifts.routes";
 import { terminalsRouter } from "./routes/terminals.routes";
 import { reportsRouter } from "./routes/reports.routes";
 import { licenseStatusRouter } from "./routes/license.routes";
+import { businessRouter } from "./routes/business.routes";
 
 const app = express();
 
@@ -55,6 +56,7 @@ app.use("/api/staff", staffRouter);
 app.use("/api/shifts", shiftsRouter);
 app.use("/api/terminals", terminalsRouter);
 app.use("/api/reports", reportsRouter);
+app.use("/api/business", businessRouter);
 
 app.use(errorHandler);
 

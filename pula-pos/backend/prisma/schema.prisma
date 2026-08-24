@@ -274,11 +274,13 @@ enum PaymentMethod {
   CASH
   CARD
   MOBILE_MONEY
+  ORANGE_MONEY
+  MYZAKA
+  SMEGA
   BANK_TRANSFER
   ACCOUNT
   MIXED
 }
-
 model Sale {
   id           String        @id @default(cuid())
   business     Business      @relation(fields: [businessId], references: [id])

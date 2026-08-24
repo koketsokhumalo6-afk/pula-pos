@@ -19,6 +19,11 @@ interface Product {
   unit: string;
 }
 
+interface Category {
+  id: string;
+  name: string;
+}
+
 /** Renders a quantity with its unit, e.g. "12.5 kg" — bare units like "each" are omitted since they're implied. */
 function qtyLabel(qty: string | number, unit: string) {
   return unit && unit !== "each" ? `${qty} ${unit}` : `${qty}`;
@@ -34,22 +39,38 @@ const empty = { name: "", sku: "", barcode: "", category: "", costPrice: "", sel
 export function ProductsPage() {
   const { business } = useAuth();
   const [products, setProducts] = useState<Product[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [filterCategory, setFilterCategory] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Product | null>(null);
   const [form, setForm] = useState(empty);
   const [customUnit, setCustomUnit] = useState(false);
+  const [customCategory, setCustomCategory] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [imageError, setImageError] = useState<string | null>(null);
 
   useEffect(() => { load(); }, []);
-  function load() { api.get<Product[]>("/products").then(setProducts).catch(() => {}); }
+  function load() {
+    api.get<Product[]>("/products").then(setProducts).catch(() => {});
+    api.get<Category[]>("/categories").then(setCategories).catch(() => {});
+  }
 
-  function openNew() { setEditing(null); setForm(empty); setCustomUnit(false); setError(null); setImageError(null); setShowForm(true); }
+  // Filter dropdown covers the managed category list plus any category text
+  // already in use on a product (e.g. typed in before this feature existed),
+  // so nothing already on a product ever silently disappears from the filter.
+  const categoryFilterOptions = Array.from(
+    new Set([...categories.map((c) => c.name), ...products.map((p) => p.category).filter((c): c is string => !!c)])
+  ).sort((a, b) => a.localeCompare(b));
+  const visibleProducts = filterCategory ? products.filter((p) => p.category === filterCategory) : products;
+
+  function openNew() { setEditing(null); setForm(empty); setCustomUnit(false); setCustomCategory(false); setError(null); setImageError(null); setShowForm(true); }
   function openEdit(p: Product) {
     setEditing(p);
     const unit = p.unit || "each";
-    setForm({ name: p.name, sku: p.sku || "", barcode: p.barcode || "", category: p.category || "", costPrice: p.costPrice, sellPrice: p.sellPrice, taxRate: p.taxRate, quantity: p.quantity, reorderLevel: p.reorderLevel, imageUrl: p.imageUrl || "", unit });
+    const category = p.category || "";
+    setForm({ name: p.name, sku: p.sku || "", barcode: p.barcode || "", category, costPrice: p.costPrice, sellPrice: p.sellPrice, taxRate: p.taxRate, quantity: p.quantity, reorderLevel: p.reorderLevel, imageUrl: p.imageUrl || "", unit });
     setCustomUnit(!UNIT_OPTIONS.includes(unit));
+    setCustomCategory(!!category && !categories.some((c) => c.name === category));
     setError(null);
     setImageError(null);
     setShowForm(true);
@@ -106,13 +127,26 @@ export function ProductsPage() {
         <h2 style={{ margin: 0 }}>Products</h2>
         <button className="btn btn-primary" onClick={openNew}>+ New Product</button>
       </div>
+
+      {categoryFilterOptions.length > 0 && (
+        <div className="field" style={{ maxWidth: 260, marginBottom: 14 }}>
+          <label>Filter by category</label>
+          <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)}>
+            <option value="">All categories</option>
+            {categoryFilterOptions.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
       <div className="card">
         <table>
           <thead>
             <tr><th></th><th>Name</th><th>SKU</th><th>Category</th><th>Price</th><th>Stock</th><th></th></tr>
           </thead>
           <tbody>
-            {products.map((p) => (
+            {visibleProducts.map((p) => (
               <tr key={p.id}>
                 <td>
                   {p.imageUrl ? (
@@ -135,6 +169,7 @@ export function ProductsPage() {
           </tbody>
         </table>
         {!products.length && <p className="muted" style={{ padding: 12 }}>No products yet — add your first one.</p>}
+        {!!products.length && !visibleProducts.length && <p className="muted" style={{ padding: 12 }}>No products in this category.</p>}
       </div>
 
       {showForm && (
@@ -167,7 +202,29 @@ export function ProductsPage() {
               <div className="field"><label>SKU</label><input value={form.sku} onChange={(e) => setForm({ ...form, sku: e.target.value })} /></div>
               <div className="field"><label>Barcode</label><input value={form.barcode} onChange={(e) => setForm({ ...form, barcode: e.target.value })} /></div>
             </div>
-            <div className="field"><label>Category</label><input value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} /></div>
+            <div className="field">
+              <label>Category</label>
+              <select
+                value={customCategory ? "__custom__" : form.category}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === "__custom__") { setCustomCategory(true); setForm({ ...form, category: "" }); }
+                  else { setCustomCategory(false); setForm({ ...form, category: v }); }
+                }}
+              >
+                <option value="">No category</option>
+                {categories.map((c) => (
+                  <option key={c.id} value={c.name}>{c.name}</option>
+                ))}
+                <option value="__custom__">Custom…</option>
+              </select>
+              {customCategory && (
+                <input style={{ marginTop: 6 }} value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="Type a category name" />
+              )}
+              <div className="muted" style={{ fontSize: 11.5, marginTop: 4 }}>
+                Manage the category list from the Categories tab.
+              </div>
+            </div>
             <div className="grid grid-2">
               <div className="field"><label>Cost price</label><input type="number" value={form.costPrice} onChange={(e) => setForm({ ...form, costPrice: e.target.value })} /></div>
               <div className="field"><label>Sell price *</label><input type="number" value={form.sellPrice} onChange={(e) => setForm({ ...form, sellPrice: e.target.value })} /></div>

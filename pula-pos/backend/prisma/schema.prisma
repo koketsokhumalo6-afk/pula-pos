@@ -126,6 +126,7 @@ model Business {
   users        User[]
   terminals    Terminal[]
   products     Product[]
+  categories   Category[]
   stockMovements StockMovement[]
   customers    Customer[]
   suppliers    Supplier[]
@@ -208,6 +209,21 @@ model Product {
   @@unique([businessId, sku])
 }
 
+// A curated list of product categories per business — kept separate from
+// Product.category (a plain string) so existing products are never touched
+// just by managing this list. Renaming here also relabels matching products
+// (see the /categories PUT route); deleting only removes it from the list.
+model Category {
+  id         String   @id @default(cuid())
+  business   Business @relation(fields: [businessId], references: [id])
+  businessId String
+  name       String
+  createdAt  DateTime @default(now())
+
+  @@unique([businessId, name])
+  @@index([businessId])
+}
+
 enum StockMovementType {
   SALE
   PURCHASE
@@ -283,6 +299,7 @@ enum PaymentMethod {
   ACCOUNT
   MIXED
 }
+
 model Sale {
   id           String        @id @default(cuid())
   business     Business      @relation(fields: [businessId], references: [id])

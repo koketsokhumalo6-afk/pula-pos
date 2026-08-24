@@ -8,6 +8,7 @@ const NAV = [
   { to: "/", label: "Dashboard", end: true },
   { to: "/pos", label: "Point of Sale" },
   { to: "/products", label: "Products" },
+  { to: "/categories", label: "Categories" },
   { to: "/stock", label: "Stock" },
   { to: "/customers", label: "Customers" },
   { to: "/suppliers", label: "Suppliers" },

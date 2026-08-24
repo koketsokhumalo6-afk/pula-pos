@@ -23,6 +23,7 @@ businessRouter.get(
         address: true,
         taxNumber: true,
         currency: true,
+        logoUrl: true,
       },
     });
     if (!business) throw notFound();
@@ -36,6 +37,7 @@ const updateSchema = z.object({
   phone: z.string().optional(),
   address: z.string().optional(),
   taxNumber: z.string().optional(),
+  logoUrl: z.string().max(2_000_000).optional(), // base64 data URL, client-side resized before upload
 });
 
 /**

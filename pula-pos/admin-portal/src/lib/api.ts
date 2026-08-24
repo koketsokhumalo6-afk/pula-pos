@@ -25,9 +25,13 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json", ...(options.headers as any) };
   if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
 
+  const hadToken = !!accessToken;
   const res = await fetch(`${API_URL}${path}`, { ...options, headers });
 
-  if (res.status === 401) {
+  // A 401 with no token attached means this request was never authenticated
+  // in the first place (e.g. a login attempt with the wrong email/password),
+  // so it should surface the backend's actual message, not "session expired".
+  if (res.status === 401 && hadToken) {
     onUnauthorized?.();
     throw new ApiRequestError(401, "Session expired. Please log in again.");
   }

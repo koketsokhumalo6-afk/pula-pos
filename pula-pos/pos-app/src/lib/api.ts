@@ -1,12 +1,16 @@
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:4000/api";
 
-let accessToken: string | null = localStorage.getItem("pula_admin_token");
+let accessToken: string | null = localStorage.getItem("pula_token");
 let onUnauthorized: (() => void) | null = null;
 
 export function setAccessToken(token: string | null) {
   accessToken = token;
-  if (token) localStorage.setItem("pula_admin_token", token);
-  else localStorage.removeItem("pula_admin_token");
+  if (token) localStorage.setItem("pula_token", token);
+  else localStorage.removeItem("pula_token");
+}
+
+export function getAccessToken() {
+  return accessToken;
 }
 
 export function setUnauthorizedHandler(fn: () => void) {
@@ -35,6 +39,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     onUnauthorized?.();
     throw new ApiRequestError(401, "Session expired. Please log in again.");
   }
+
   if (!res.ok) {
     let message = `Request failed (${res.status})`;
     try {
@@ -45,6 +50,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     }
     throw new ApiRequestError(res.status, message);
   }
+
   if (res.status === 204) return undefined as T;
   return res.json();
 }
@@ -52,5 +58,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 export const api = {
   get: <T>(path: string) => request<T>(path, { method: "GET" }),
   post: <T>(path: string, body?: unknown) => request<T>(path, { method: "POST", body: body ? JSON.stringify(body) : undefined }),
+  put: <T>(path: string, body?: unknown) => request<T>(path, { method: "PUT", body: body ? JSON.stringify(body) : undefined }),
   patch: <T>(path: string, body?: unknown) => request<T>(path, { method: "PATCH", body: body ? JSON.stringify(body) : undefined }),
+  del: <T>(path: string) => request<T>(path, { method: "DELETE" }),
 };

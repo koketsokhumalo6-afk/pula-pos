@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { api, ApiRequestError } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { money } from "../lib/format";
+import { Receipt } from "../components/Receipt";
+import type { ReceiptData } from "../lib/receipt";
 
 interface Product {
   id: string;
@@ -43,7 +45,8 @@ const PAYMENT_METHODS = [
 ] as const;
 
 export function PosPage() {
-  const { business } = useAuth();
+  const { business, user } = useAuth();
+  const [receiptSale, setReceiptSale] = useState<ReceiptData | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [managedCategories, setManagedCategories] = useState<{ id: string; name: string }[]>([]);
   const [selectedCategory, setSelectedCategory] = useState("");
@@ -118,13 +121,36 @@ export function PosPage() {
     setSuccess(null);
     setSubmitting(true);
     try {
-      const sale = await api.post<{ saleNumber: string }>("/sales", {
+      const sale = await api.post<{ saleNumber: string; createdAt: string }>("/sales", {
         items: cart.map((l) => ({ productId: l.product.id, quantity: l.quantity, unitPrice: Number(l.product.sellPrice), discount: l.discount })),
         customerId: customerId || undefined,
         amountPaid: paid || totals.total,
         paymentMethod,
       });
       setSuccess(`Sale ${sale.saleNumber} completed.`);
+      // Built from the cart still in memory rather than re-fetching — the
+      // sale response doesn't include product names, and this data is only
+      // needed for the receipt shown immediately after checkout.
+      setReceiptSale({
+        saleNumber: sale.saleNumber,
+        createdAt: sale.createdAt,
+        cashierName: user?.name || "",
+        customerName: customerId ? customers.find((c) => c.id === customerId)?.name || null : null,
+        paymentMethod,
+        items: cart.map((l) => ({
+          name: l.product.name,
+          unit: l.product.unit,
+          quantity: l.quantity,
+          unitPrice: Number(l.product.sellPrice),
+          total: Number(l.product.sellPrice) * l.quantity,
+        })),
+        subtotal: totals.subtotal,
+        discountTotal: totals.discountTotal,
+        taxTotal: totals.taxTotal,
+        total: totals.total,
+        amountPaid: paid || totals.total,
+        changeDue,
+      });
       setCart([]);
       setAmountPaid("");
       loadProducts();
@@ -255,6 +281,8 @@ export function PosPage() {
           </button>
         </div>
       </div>
+
+      {receiptSale && <Receipt sale={receiptSale} onClose={() => setReceiptSale(null)} />}
     </div>
   );
 }

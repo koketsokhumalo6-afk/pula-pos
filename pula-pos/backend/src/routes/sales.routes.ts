@@ -53,7 +53,9 @@ const createSaleSchema = z.object({
   terminalId: z.string().optional(),
   shiftId: z.string().optional(),
   amountPaid: z.number().nonnegative(),
-  paymentMethod: z.enum(["CASH", "CARD", "MOBILE_MONEY", "BANK_TRANSFER", "ACCOUNT", "MIXED"]).default("CASH"),
+  paymentMethod: z
+    .enum(["CASH", "CARD", "MOBILE_MONEY", "ORANGE_MONEY", "MYZAKA", "SMEGA", "BANK_TRANSFER", "ACCOUNT", "MIXED"])
+    .default("CASH"),
 });
 
 /**

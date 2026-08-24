@@ -3,6 +3,7 @@ import { LoginPage } from "./pages/Login";
 import { DashboardPage } from "./pages/Dashboard";
 import { PosPage } from "./pages/Pos";
 import { ProductsPage } from "./pages/Products";
+import { CategoriesPage } from "./pages/Categories";
 import { StockPage } from "./pages/Stock";
 import { CustomersPage } from "./pages/Customers";
 import { SuppliersPage } from "./pages/Suppliers";
@@ -32,6 +33,7 @@ export default function App() {
         <Route path="/" element={<DashboardPage />} />
         <Route path="/pos" element={<PosPage />} />
         <Route path="/products" element={<ProductsPage />} />
+        <Route path="/categories" element={<CategoriesPage />} />
         <Route path="/stock" element={<StockPage />} />
         <Route path="/customers" element={<CustomersPage />} />
         <Route path="/suppliers" element={<SuppliersPage />} />

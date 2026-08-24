@@ -12,6 +12,7 @@ interface Product {
   quantity: string;
   imageUrl: string | null;
   unit: string;
+  category: string | null;
 }
 
 /** Renders a quantity with its unit, e.g. "12.5 kg" — bare units like "each" are omitted since they're implied. */
@@ -44,6 +45,8 @@ const PAYMENT_METHODS = [
 export function PosPage() {
   const { business } = useAuth();
   const [products, setProducts] = useState<Product[]>([]);
+  const [managedCategories, setManagedCategories] = useState<{ id: string; name: string }[]>([]);
+  const [selectedCategory, setSelectedCategory] = useState("");
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [search, setSearch] = useState("");
   const [cart, setCart] = useState<CartLine[]>([]);
@@ -57,6 +60,7 @@ export function PosPage() {
   useEffect(() => {
     loadProducts();
     api.get<Customer[]>("/customers").then(setCustomers).catch(() => {});
+    api.get<{ id: string; name: string }[]>("/categories").then(setManagedCategories).catch(() => {});
   }, []);
 
   function loadProducts(q?: string) {
@@ -65,6 +69,13 @@ export function PosPage() {
       .then(setProducts)
       .catch(() => {});
   }
+
+  // Tabs combine the managed category list with any category text already
+  // in use on a loaded product, so nothing gets left off the shelf.
+  const categoryTabs = Array.from(
+    new Set([...managedCategories.map((c) => c.name), ...products.map((p) => p.category).filter((c): c is string => !!c)])
+  ).sort((a, b) => a.localeCompare(b));
+  const visibleProducts = selectedCategory ? products.filter((p) => p.category === selectedCategory) : products;
 
   function addToCart(product: Product) {
     setCart((prev) => {
@@ -140,8 +151,25 @@ export function PosPage() {
       </div>
 
       <div className="pos-layout">
-        <div className="product-grid">
-          {products.map((p) => (
+        <div className="product-panel">
+          {categoryTabs.length > 0 && (
+            <div className="category-tabs">
+              <button className={`category-tab${selectedCategory === "" ? " active" : ""}`} onClick={() => setSelectedCategory("")}>
+                All
+              </button>
+              {categoryTabs.map((c) => (
+                <button
+                  key={c}
+                  className={`category-tab${selectedCategory === c ? " active" : ""}`}
+                  onClick={() => setSelectedCategory(c)}
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="product-grid">
+          {visibleProducts.map((p) => (
             <button key={p.id} className="product-tile" onClick={() => addToCart(p)} disabled={Number(p.quantity) <= 0}>
               {p.imageUrl ? (
                 <img src={p.imageUrl} alt={p.name} className="product-tile-img" />
@@ -153,7 +181,8 @@ export function PosPage() {
               <div className="stock">{Number(p.quantity) <= 0 ? "Out of stock" : `${qtyLabel(p.quantity, p.unit)} in stock`}</div>
             </button>
           ))}
-          {!products.length && <p className="muted">No products found.</p>}
+          {!visibleProducts.length && <p className="muted">No products found.</p>}
+          </div>
         </div>
 
         <div className="cart-panel">

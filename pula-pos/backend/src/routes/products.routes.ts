@@ -47,8 +47,9 @@ const createSchema = z.object({
   costPrice: z.number().nonnegative().default(0),
   sellPrice: z.number().nonnegative(),
   taxRate: z.number().nonnegative().default(0),
-  quantity: z.number().nonnegative().default(0),
+    quantity: z.number().nonnegative().default(0),
   reorderLevel: z.number().nonnegative().default(0),
+  imageUrl: z.string().max(2_000_000).optional(), // base64 data URL, client-side resized before upload
 });
 
 productsRouter.post(

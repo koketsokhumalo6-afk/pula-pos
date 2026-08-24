@@ -1,7 +1,12 @@
 import { useEffect, useState } from "react";
 import { api, ApiRequestError } from "../lib/api";
 
-interface Product { id: string; name: string; sku: string | null; quantity: string; reorderLevel: string; }
+interface Product { id: string; name: string; sku: string | null; quantity: string; reorderLevel: string; unit: string; }
+
+/** Renders a quantity with its unit, e.g. "12.5 kg" — bare units like "each" are omitted since they're implied. */
+function qtyLabel(qty: string | number, unit: string) {
+  return unit && unit !== "each" ? `${qty} ${unit}` : `${qty}`;
+}
 
 export function StockPage() {
   const [products, setProducts] = useState<Product[]>([]);
@@ -53,6 +58,8 @@ export function StockPage() {
     setAddingStock(true);
   }
 
+  const addProduct = products.find((p) => p.id === addProductId);
+
   async function submitAddStock() {
     setAddError(null);
     if (!addProductId) { setAddError("Select a product"); return; }
@@ -61,7 +68,7 @@ export function StockPage() {
     try {
       const product = products.find((p) => p.id === addProductId);
       await api.post(`/products/${addProductId}/adjust`, { quantity: n, reason: addReason || "Stock received" });
-      setAddSuccess(`Added ${n} to ${product?.name || "product"}.`);
+      setAddSuccess(`Added ${qtyLabel(n, product?.unit || "each")} to ${product?.name || "product"}.`);
       setAddProductId("");
       setAddQty("");
       setAddReason("Stock received");
@@ -92,8 +99,8 @@ export function StockPage() {
               <tr key={p.id}>
                 <td>{p.name}</td>
                 <td>{p.sku || "—"}</td>
-                <td>{p.quantity}</td>
-                <td>{p.reorderLevel}</td>
+                <td>{qtyLabel(p.quantity, p.unit)}</td>
+                <td>{qtyLabel(p.reorderLevel, p.unit)}</td>
                 <td><button className="btn btn-secondary btn-sm" onClick={() => setAdjusting(p)}>Adjust</button></td>
               </tr>
             ))}
@@ -111,13 +118,13 @@ export function StockPage() {
               <select value={addProductId} onChange={(e) => setAddProductId(e.target.value)}>
                 <option value="">Select product…</option>
                 {products.map((p) => (
-                  <option key={p.id} value={p.id}>{p.name}{p.sku ? ` (${p.sku})` : ""} — currently {p.quantity}</option>
+                  <option key={p.id} value={p.id}>{p.name}{p.sku ? ` (${p.sku})` : ""} — currently {qtyLabel(p.quantity, p.unit)}</option>
                 ))}
               </select>
             </div>
             <div className="field">
-              <label>Quantity to add</label>
-              <input type="number" min={1} value={addQty} onChange={(e) => setAddQty(e.target.value)} placeholder="e.g. 50" />
+              <label>Quantity to add{addProduct && addProduct.unit !== "each" ? ` (${addProduct.unit})` : ""}</label>
+              <input type="number" min={0.01} step="any" value={addQty} onChange={(e) => setAddQty(e.target.value)} placeholder={addProduct && addProduct.unit !== "each" ? `e.g. 5.5` : "e.g. 50"} />
             </div>
             <div className="field">
               <label>Reason / reference (optional)</label>
@@ -137,7 +144,7 @@ export function StockPage() {
         <div className="modal-overlay" onClick={() => setAdjusting(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h3>Adjust stock — {adjusting.name}</h3>
-            <div className="field"><label>Quantity change (+ to add, − to remove)</label><input type="number" value={qty} onChange={(e) => setQty(e.target.value)} /></div>
+            <div className="field"><label>Quantity change{adjusting.unit !== "each" ? ` in ${adjusting.unit}` : ""} (+ to add, − to remove)</label><input type="number" step="any" value={qty} onChange={(e) => setQty(e.target.value)} /></div>
             <div className="field"><label>Reason</label><input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. stock count correction, damage" /></div>
             {error && <div className="error-text">{error}</div>}
             <div className="gap-8" style={{ marginTop: 10 }}>

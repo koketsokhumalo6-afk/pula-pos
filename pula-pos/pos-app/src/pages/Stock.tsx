@@ -6,10 +6,23 @@ interface Product { id: string; name: string; sku: string | null; quantity: stri
 export function StockPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [lowStock, setLowStock] = useState<Product[]>([]);
+
+  // "Adjust" modal — per-row, supports both adding and removing stock
+  // (e.g. stock count corrections, damages) via a signed quantity.
   const [adjusting, setAdjusting] = useState<Product | null>(null);
   const [qty, setQty] = useState("");
   const [reason, setReason] = useState("");
   const [error, setError] = useState<string | null>(null);
+
+  // "Add Stock" modal — the obvious, dedicated way to receive new stock.
+  // Product is picked from a dropdown (not tied to a table row), quantity
+  // is always positive, and the reason defaults to something sensible.
+  const [addingStock, setAddingStock] = useState(false);
+  const [addProductId, setAddProductId] = useState("");
+  const [addQty, setAddQty] = useState("");
+  const [addReason, setAddReason] = useState("Stock received");
+  const [addError, setAddError] = useState<string | null>(null);
+  const [addSuccess, setAddSuccess] = useState<string | null>(null);
 
   useEffect(() => { load(); }, []);
   function load() {
@@ -31,9 +44,39 @@ export function StockPage() {
     }
   }
 
+  function openAddStock() {
+    setAddProductId("");
+    setAddQty("");
+    setAddReason("Stock received");
+    setAddError(null);
+    setAddSuccess(null);
+    setAddingStock(true);
+  }
+
+  async function submitAddStock() {
+    setAddError(null);
+    if (!addProductId) { setAddError("Select a product"); return; }
+    const n = Number(addQty);
+    if (!n || n <= 0) { setAddError("Enter a quantity greater than 0"); return; }
+    try {
+      const product = products.find((p) => p.id === addProductId);
+      await api.post(`/products/${addProductId}/adjust`, { quantity: n, reason: addReason || "Stock received" });
+      setAddSuccess(`Added ${n} to ${product?.name || "product"}.`);
+      setAddProductId("");
+      setAddQty("");
+      setAddReason("Stock received");
+      load();
+    } catch (err) {
+      setAddError(err instanceof ApiRequestError ? err.message : "Failed to add stock");
+    }
+  }
+
   return (
     <div>
-      <h2 style={{ marginTop: 0 }}>Stock</h2>
+      <div className="flex-between" style={{ marginBottom: 14 }}>
+        <h2 style={{ margin: 0 }}>Stock</h2>
+        <button className="btn btn-primary" onClick={openAddStock}>+ Add Stock</button>
+      </div>
 
       {lowStock.length > 0 && (
         <div className="card" style={{ marginBottom: 16, borderColor: "#f0c36d" }}>
@@ -56,7 +99,39 @@ export function StockPage() {
             ))}
           </tbody>
         </table>
+        {!products.length && <p className="muted" style={{ padding: 12 }}>No products yet — add a product first, then you can add stock to it.</p>}
       </div>
+
+      {addingStock && (
+        <div className="modal-overlay" onClick={() => setAddingStock(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Add Stock</h3>
+            <div className="field">
+              <label>Product</label>
+              <select value={addProductId} onChange={(e) => setAddProductId(e.target.value)}>
+                <option value="">Select product…</option>
+                {products.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}{p.sku ? ` (${p.sku})` : ""} — currently {p.quantity}</option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label>Quantity to add</label>
+              <input type="number" min={1} value={addQty} onChange={(e) => setAddQty(e.target.value)} placeholder="e.g. 50" />
+            </div>
+            <div className="field">
+              <label>Reason / reference (optional)</label>
+              <input value={addReason} onChange={(e) => setAddReason(e.target.value)} placeholder="e.g. New delivery, restock" />
+            </div>
+            {addError && <div className="error-text">{addError}</div>}
+            {addSuccess && <div style={{ color: "#146c43", fontSize: 13, margin: "8px 0" }}>{addSuccess}</div>}
+            <div className="gap-8" style={{ marginTop: 10 }}>
+              <button className="btn btn-primary" onClick={submitAddStock}>Add Stock</button>
+              <button className="btn btn-secondary" onClick={() => setAddingStock(false)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {adjusting && (
         <div className="modal-overlay" onClick={() => setAdjusting(null)}>

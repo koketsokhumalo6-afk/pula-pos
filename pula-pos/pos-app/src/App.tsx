@@ -14,6 +14,7 @@ import { QuotationsPage } from "./pages/Quotations";
 import { ShiftsPage } from "./pages/Shifts";
 import { ReportsPage } from "./pages/Reports";
 import { StaffPage } from "./pages/Staff";
+import { SettingsPage } from "./pages/Settings";
 import { Layout } from "./components/Layout";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 
@@ -42,6 +43,7 @@ export default function App() {
         <Route path="/shifts" element={<ShiftsPage />} />
         <Route path="/reports" element={<ReportsPage />} />
         <Route path="/staff" element={<StaffPage />} />
+        <Route path="/settings" element={<SettingsPage />} />
       </Route>
     </Routes>
   );

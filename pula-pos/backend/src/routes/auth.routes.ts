@@ -44,7 +44,7 @@ authRouter.post(
     const accessToken = jwt.sign(
       { sub: user.id, businessId: user.businessId, role: user.role },
       env.jwtAccessSecret,
-      { expiresIn: env.accessTokenTtl }
+      { expiresIn: env.accessTokenTtl } as jwt.SignOptions
     );
 
     res.json({
@@ -86,7 +86,7 @@ authRouter.post(
 
     const accessToken = jwt.sign({ sub: admin.id, role: admin.role }, env.superAdminJwtSecret, {
       expiresIn: env.accessTokenTtl,
-    });
+    } as jwt.SignOptions);
 
     res.json({ accessToken, admin: { id: admin.id, name: admin.name, email: admin.email, role: admin.role } });
   })

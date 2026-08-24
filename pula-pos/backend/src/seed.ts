@@ -2,12 +2,21 @@
  * Seeds the platform with: subscription plans, one super admin (you, the
  * Pula POS operator), and one demo business so you can log in immediately
  * after deploying. Run once via `npm run seed`.
+ *
+ * Also syncs the database schema on every run via `prisma db push` — this
+ * project ships without a checked-in migrations history, so this is what
+ * actually creates/updates the tables on first boot and on every schema
+ * change. It's a no-op once the database already matches schema.prisma.
  */
+import { execSync } from "child_process";
 import bcrypt from "bcryptjs";
 import { prisma } from "./lib/prisma";
 import { generateLicenseKey } from "./utils/license";
 
 async function main() {
+  console.log("Syncing database schema...");
+  execSync("npx prisma db push --accept-data-loss --skip-generate", { stdio: "inherit" });
+
   const plans = [
     { code: "STARTER" as const, name: "Starter", maxUsers: 2, maxTerminals: 1, priceYearly: 1200 },
     { code: "STANDARD" as const, name: "Standard", maxUsers: 5, maxTerminals: 3, priceYearly: 2800 },

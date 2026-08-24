@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ChangeEvent } from "react";
 import { Link } from "react-router-dom";
 import { api, ApiRequestError } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
+import { resizeImageToDataUrl } from "../lib/image";
 
 /* ------------------------------- Icons ---------------------------------- */
 /* Small hand-drawn line icons (no external icon library / dependency) so
@@ -114,14 +115,16 @@ interface BusinessProfile {
   address: string | null;
   taxNumber: string | null;
   currency: string;
+  logoUrl: string | null;
 }
 
 function BusinessProfileSection() {
   const [profile, setProfile] = useState<BusinessProfile | null>(null);
-  const [form, setForm] = useState({ name: "", tradingName: "", phone: "", address: "", taxNumber: "" });
+  const [form, setForm] = useState({ name: "", tradingName: "", phone: "", address: "", taxNumber: "", logoUrl: "" });
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [logoError, setLogoError] = useState<string | null>(null);
 
   useEffect(() => {
     api.get<BusinessProfile>("/business").then((b) => {
@@ -132,9 +135,24 @@ function BusinessProfileSection() {
         phone: b.phone || "",
         address: b.address || "",
         taxNumber: b.taxNumber || "",
+        logoUrl: b.logoUrl || "",
       });
     }).catch(() => {});
   }, []);
+
+  async function onLogoSelected(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setLogoError(null);
+    try {
+      const dataUrl = await resizeImageToDataUrl(file, 320, 0.75);
+      setForm((f) => ({ ...f, logoUrl: dataUrl }));
+    } catch {
+      setLogoError("Couldn't read that image — try a different file.");
+    } finally {
+      e.target.value = "";
+    }
+  }
 
   async function save() {
     setError(null);
@@ -147,8 +165,10 @@ function BusinessProfileSection() {
         phone: form.phone || undefined,
         address: form.address || undefined,
         taxNumber: form.taxNumber || undefined,
+        logoUrl: form.logoUrl || undefined,
       });
       setSuccess("Business profile updated.");
+      // Nav sidebar caches the logo — a refresh will pick up the new one immediately.
     } catch (err) {
       setError(err instanceof ApiRequestError ? err.message : "Failed to save changes");
     } finally {
@@ -161,6 +181,27 @@ function BusinessProfileSection() {
   return (
     <div className="card" style={{ maxWidth: 520 }}>
       <h3 style={{ marginTop: 0 }}>Business Profile</h3>
+
+      <div className="field">
+        <label>Company logo</label>
+        <div className="gap-8" style={{ alignItems: "center" }}>
+          {form.logoUrl ? (
+            <img src={form.logoUrl} alt="Logo preview" className="thumb thumb-lg" />
+          ) : (
+            <div className="thumb thumb-lg thumb-placeholder">{form.name ? form.name.charAt(0).toUpperCase() : "?"}</div>
+          )}
+          <div>
+            <input type="file" accept="image/*" onChange={onLogoSelected} />
+            {form.logoUrl && (
+              <button type="button" className="btn btn-secondary btn-sm" style={{ marginTop: 6 }} onClick={() => setForm({ ...form, logoUrl: "" })}>
+                Remove logo
+              </button>
+            )}
+          </div>
+        </div>
+        {logoError && <div className="error-text">{logoError}</div>}
+      </div>
+
       <div className="field"><label>Business name *</label><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></div>
       <div className="field"><label>Trading name</label><input value={form.tradingName} onChange={(e) => setForm({ ...form, tradingName: e.target.value })} /></div>
       <div className="field"><label>Phone</label><input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} /></div>

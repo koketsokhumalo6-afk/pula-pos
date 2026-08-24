@@ -1,16 +1,12 @@
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:4000/api";
 
-let accessToken: string | null = localStorage.getItem("pula_token");
+let accessToken: string | null = localStorage.getItem("pula_admin_token");
 let onUnauthorized: (() => void) | null = null;
 
 export function setAccessToken(token: string | null) {
   accessToken = token;
-  if (token) localStorage.setItem("pula_token", token);
-  else localStorage.removeItem("pula_token");
-}
-
-export function getAccessToken() {
-  return accessToken;
+  if (token) localStorage.setItem("pula_admin_token", token);
+  else localStorage.removeItem("pula_admin_token");
 }
 
 export function setUnauthorizedHandler(fn: () => void) {
@@ -29,13 +25,16 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json", ...(options.headers as any) };
   if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
 
+  const hadToken = !!accessToken;
   const res = await fetch(`${API_URL}${path}`, { ...options, headers });
 
-  if (res.status === 401) {
+  // A 401 with no token attached means this request was never authenticated
+  // in the first place (e.g. a login attempt with the wrong email/password),
+  // so it should surface the backend's actual message, not "session expired".
+  if (res.status === 401 && hadToken) {
     onUnauthorized?.();
     throw new ApiRequestError(401, "Session expired. Please log in again.");
   }
-
   if (!res.ok) {
     let message = `Request failed (${res.status})`;
     try {
@@ -46,7 +45,6 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     }
     throw new ApiRequestError(res.status, message);
   }
-
   if (res.status === 204) return undefined as T;
   return res.json();
 }
@@ -54,7 +52,5 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 export const api = {
   get: <T>(path: string) => request<T>(path, { method: "GET" }),
   post: <T>(path: string, body?: unknown) => request<T>(path, { method: "POST", body: body ? JSON.stringify(body) : undefined }),
-  put: <T>(path: string, body?: unknown) => request<T>(path, { method: "PUT", body: body ? JSON.stringify(body) : undefined }),
   patch: <T>(path: string, body?: unknown) => request<T>(path, { method: "PATCH", body: body ? JSON.stringify(body) : undefined }),
-  del: <T>(path: string) => request<T>(path, { method: "DELETE" }),
 };

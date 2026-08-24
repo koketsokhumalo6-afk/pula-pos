@@ -17,6 +17,7 @@ const NAV = [
   { to: "/shifts", label: "Shifts & Cash" },
   { to: "/reports", label: "Reports" },
   { to: "/staff", label: "Staff" },
+  { to: "/settings", label: "Settings" },
 ];
 
 export function Layout() {

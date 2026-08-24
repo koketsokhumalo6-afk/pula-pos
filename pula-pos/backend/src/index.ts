@@ -8,6 +8,7 @@ import { errorHandler } from "./middleware/errorHandler";
 import { authRouter } from "./routes/auth.routes";
 import { adminRouter } from "./routes/admin.routes";
 import { productsRouter } from "./routes/products.routes";
+import { categoriesRouter } from "./routes/categories.routes";
 import { customersRouter } from "./routes/customers.routes";
 import { suppliersRouter } from "./routes/suppliers.routes";
 import { salesRouter } from "./routes/sales.routes";
@@ -45,6 +46,7 @@ app.use("/api/admin", adminRouter);
 // Business/tenant-scoped API (every route below requires a business user token)
 app.use("/api/license", licenseStatusRouter);
 app.use("/api/products", productsRouter);
+app.use("/api/categories", categoriesRouter);
 app.use("/api/customers", customersRouter);
 app.use("/api/suppliers", suppliersRouter);
 app.use("/api/sales", salesRouter);

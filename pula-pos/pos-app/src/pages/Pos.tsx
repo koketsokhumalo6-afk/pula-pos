@@ -10,6 +10,7 @@ interface Product {
   sellPrice: string;
   taxRate: string;
   quantity: string;
+  imageUrl: string | null;
 }
 
 interface Customer {
@@ -136,6 +137,11 @@ export function PosPage() {
         <div className="product-grid">
           {products.map((p) => (
             <button key={p.id} className="product-tile" onClick={() => addToCart(p)} disabled={Number(p.quantity) <= 0}>
+              {p.imageUrl ? (
+                <img src={p.imageUrl} alt={p.name} className="product-tile-img" />
+              ) : (
+                <div className="product-tile-img product-tile-img-placeholder">{p.name.charAt(0).toUpperCase()}</div>
+              )}
               <div className="name">{p.name}</div>
               <div className="price">{money(p.sellPrice, business?.currency)}</div>
               <div className="stock">{Number(p.quantity) <= 0 ? "Out of stock" : `${p.quantity} in stock`}</div>

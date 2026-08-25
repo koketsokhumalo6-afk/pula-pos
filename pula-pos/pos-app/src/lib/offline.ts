@@ -1,521 +1,179 @@
-// Pula POS — Multi-tenant SaaS data model
-// PostgreSQL, managed/hosted by the server (no local install for customers).
+import { useEffect, useState } from "react";
+import { api, ApiRequestError } from "./api";
 
-generator client {
-  provider = "prisma-client-js"
+/* ------------------------------ ids & status ------------------------------- */
+
+/**
+ * A locally-generated id used both as a temporary key for a queued offline
+ * sale and as the idempotency key (`clientRef`) sent with every checkout —
+ * so a sale that's retried after a partial failure (the response never made
+ * it back, but the sale was actually created) is never double-recorded.
+ */
+export function generateId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+/** Tracks the browser's online/offline state, updating on the standard
+ * `online`/`offline` window events. Not a perfect signal (a device can
+ * report "online" while genuinely unable to reach the server), which is why
+ * checkout() also treats a network-type fetch failure as offline regardless
+ * of what this reports. */
+export function useOnlineStatus(): boolean {
+  const [online, setOnline] = useState(() => (typeof navigator === "undefined" ? true : navigator.onLine));
+
+  useEffect(() => {
+    const goOnline = () => setOnline(true);
+    const goOffline = () => setOnline(false);
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    return () => {
+      window.removeEventListener("online", goOnline);
+      window.removeEventListener("offline", goOffline);
+    };
+  }, []);
+
+  return online;
 }
 
-// ---------------------------------------------------------------------------
-// PLATFORM LEVEL (Master Admin — Pula POS operator, not a business tenant)
-// ---------------------------------------------------------------------------
+/* ------------------------------- local cache -------------------------------- */
+// Products/customers are cached per business, not globally — a shared
+// device that logs into a different business later never shows stale data
+// left over from the previous one.
 
-enum SuperAdminRole {
-  OWNER
-  SUPPORT
+function cacheKey(businessId: string, kind: string) {
+  return `pula_cache_${businessId}_${kind}`;
 }
 
-model SuperAdmin {
-  id           String         @id @default(cuid())
-  name         String
-  email        String         @unique
-  passwordHash String
-  role         SuperAdminRole @default(SUPPORT)
-  createdAt    DateTime       @default(now())
-  lastLoginAt  DateTime?
+function readCache<T>(businessId: string, kind: string): T | null {
+  try {
+    const raw = localStorage.getItem(cacheKey(businessId, kind));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed?.data ?? null;
+  } catch {
+    return null;
+  }
 }
 
-enum PlanCode {
-  STARTER
-  STANDARD
-  PRO
-  ENTERPRISE
+function writeCache<T>(businessId: string, kind: string, data: T) {
+  try {
+    localStorage.setItem(cacheKey(businessId, kind), JSON.stringify({ savedAt: new Date().toISOString(), data }));
+  } catch {
+    /* storage full/unavailable — caching is a nice-to-have, never fatal */
+  }
 }
 
-model Plan {
-  id          String    @id @default(cuid())
-  code        PlanCode  @unique
-  name        String
-  maxUsers    Int
-  maxTerminals Int
-  priceYearly Decimal   @db.Decimal(12, 2)
-  currency    String    @default("BWP")
-  features    Json?
-  isActive    Boolean   @default(true)
-  licenses    License[]
-  createdAt   DateTime  @default(now())
+export function loadProductsCache<T>(businessId: string): T[] | null {
+  return readCache<T[]>(businessId, "products");
+}
+export function saveProductsCache<T>(businessId: string, products: T[]) {
+  writeCache(businessId, "products", products);
 }
 
-enum LicenseStatus {
-  PENDING
-  ACTIVE
-  EXPIRED
-  SUSPENDED
-  CANCELLED
+export function loadCustomersCache<T>(businessId: string): T[] | null {
+  return readCache<T[]>(businessId, "customers");
+}
+export function saveCustomersCache<T>(businessId: string, customers: T[]) {
+  writeCache(businessId, "customers", customers);
 }
 
-model License {
-  id             String        @id @default(cuid())
-  business       Business      @relation(fields: [businessId], references: [id])
-  businessId     String        @unique
-  licenseKey     String        @unique // format: PULA-YYYY-XXXX-XXXX
-  plan           Plan          @relation(fields: [planId], references: [id])
-  planId         String
-  status         LicenseStatus @default(PENDING)
-  activationDate DateTime?
-  expiryDate     DateTime?
-  maxUsers       Int
-  maxTerminals   Int
-  notes          String?
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
-  history        LicenseEvent[]
+/** Keeps a cached/in-memory product list's stock counts honest immediately
+ * after an offline sale is queued — there's no server round-trip to refresh
+ * from until that sale actually syncs, so without this the POS screen would
+ * keep showing pre-sale stock for the rest of the outage. */
+export function applyLocalStockDecrement<T extends { id: string; quantity: string }>(
+  products: T[],
+  items: { productId: string; quantity: number }[]
+): T[] {
+  const byId = new Map(items.map((i) => [i.productId, i.quantity]));
+  return products.map((p) => {
+    const qty = byId.get(p.id);
+    return qty === undefined ? p : { ...p, quantity: String(Math.max(0, Number(p.quantity) - qty)) };
+  });
 }
 
-enum LicenseEventType {
-  CREATED
-  ACTIVATED
-  RENEWED
-  SUSPENDED
-  REINSTATED
-  EXPIRED
-  EXTENDED
-  PLAN_CHANGED
-  CANCELLED
+/** Same adjustment, applied straight to the persisted cache (not just
+ * in-memory state) so it survives a refresh while still offline. */
+export function decrementCachedStock(businessId: string, items: { productId: string; quantity: number }[]) {
+  const cached = loadProductsCache<{ id: string; quantity: string }>(businessId);
+  if (!cached) return;
+  saveProductsCache(businessId, applyLocalStockDecrement(cached, items));
 }
 
-model LicenseEvent {
-  id        String           @id @default(cuid())
-  license   License          @relation(fields: [licenseId], references: [id])
-  licenseId String
-  type      LicenseEventType
-  detail    String?
-  actor     String? // super admin email/id who performed the action
-  createdAt DateTime         @default(now())
+/* --------------------------------- outbox ------------------------------------ */
+
+export interface QueuedSale {
+  clientRef: string;
+  queuedAt: string;
+  payload: Record<string, unknown>;
+  lastError?: string;
 }
 
-// ---------------------------------------------------------------------------
-// TENANT LEVEL (each Business = one customer account, fully isolated by businessId)
-// ---------------------------------------------------------------------------
-
-enum BusinessStatus {
-  ACTIVE
-  SUSPENDED
-  ARCHIVED
+function queueKey(businessId: string) {
+  return `pula_offline_queue_${businessId}`;
 }
 
-model Business {
-  id           String         @id @default(cuid())
-  name         String
-  tradingName  String?
-  email        String         @unique
-  phone        String?
-  address      String?
-  taxNumber    String?
-  currency     String         @default("BWP")
-  status       BusinessStatus @default(ACTIVE)
-  logoUrl      String?        @db.Text // base64 data URL — small logos stored directly, no file storage service needed
-  permissions  Json?          // per-role page access overrides, see backend/src/lib/permissions.ts
-  createdAt    DateTime       @default(now())
-  updatedAt    DateTime       @updatedAt
-
-  license      License?
-  users        User[]
-  terminals    Terminal[]
-  products     Product[]
-  categories   Category[]
-  stockMovements StockMovement[]
-  customers    Customer[]
-  suppliers    Supplier[]
-  sales        Sale[]
-  purchases    Purchase[]
-  expenses     Expense[]
-  invoices     Invoice[]
-  quotations   Quotation[]
-  shifts       Shift[]
-  cashMovements CashMovement[]
-  laybuyPayments LaybuyPayment[]
+export function getQueuedSales(businessId: string): QueuedSale[] {
+  try {
+    const raw = localStorage.getItem(queueKey(businessId));
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
 }
 
-enum UserRole {
-  OWNER
-  ADMIN
-  MANAGER
-  CASHIER
+function writeQueue(businessId: string, queue: QueuedSale[]) {
+  try {
+    localStorage.setItem(queueKey(businessId), JSON.stringify(queue));
+  } catch {
+    /* if storage is full there's nothing more we can do locally */
+  }
 }
 
-enum UserStatus {
-  ACTIVE
-  INACTIVE
+/** Saves a checkout payload (already carrying its `clientRef`) into the
+ * local outbox so it can be replayed once the connection comes back. */
+export function enqueueSale(businessId: string, payload: Record<string, unknown> & { clientRef: string }) {
+  const queue = getQueuedSales(businessId);
+  queue.push({ clientRef: payload.clientRef, queuedAt: new Date().toISOString(), payload });
+  writeQueue(businessId, queue);
 }
 
-model User {
-  id           String     @id @default(cuid())
-  business     Business   @relation(fields: [businessId], references: [id])
-  businessId   String
-  name         String
-  email        String
-  passwordHash String
-  role         UserRole   @default(CASHIER)
-  status       UserStatus @default(ACTIVE)
-  lastLoginAt  DateTime?
-  createdAt    DateTime   @default(now())
-
-  sales        Sale[]
-  shifts       Shift[]
-  cashMovements CashMovement[]
-
-  @@unique([businessId, email])
+export function removeQueuedSale(businessId: string, clientRef: string) {
+  writeQueue(businessId, getQueuedSales(businessId).filter((q) => q.clientRef !== clientRef));
 }
 
-model Terminal {
-  id         String   @id @default(cuid())
-  business   Business @relation(fields: [businessId], references: [id])
-  businessId String
-  name       String
-  identifier String   @unique // generated code the browser session binds to
-  isActive   Boolean  @default(true)
-  createdAt  DateTime @default(now())
-  sales      Sale[]
-  shifts     Shift[]
+function updateQueuedSale(businessId: string, clientRef: string, patch: Partial<QueuedSale>) {
+  writeQueue(businessId, getQueuedSales(businessId).map((q) => (q.clientRef === clientRef ? { ...q, ...patch } : q)));
 }
 
-model Product {
-  id          String   @id @default(cuid())
-  business    Business @relation(fields: [businessId], references: [id])
-  businessId  String
-  name        String
-  sku         String?
-  barcode     String?
-  category    String?
-  unit        String   @default("each")
-  costPrice   Decimal  @db.Decimal(12, 2) @default(0)
-  sellPrice   Decimal  @db.Decimal(12, 2)
-  taxRate     Decimal  @db.Decimal(5, 2) @default(0)
-  quantity    Decimal  @db.Decimal(12, 2) @default(0) // current stock on hand
-  reorderLevel Decimal @db.Decimal(12, 2) @default(0)
-  imageUrl    String?  @db.Text // base64 data URL — small product photos stored directly, no file storage service needed
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  saleItems     SaleItem[]
-  purchaseItems PurchaseItem[]
-  movements     StockMovement[]
-
-  @@index([businessId])
-  @@unique([businessId, sku])
-}
-
-// A curated list of product categories per business — kept separate from
-// Product.category (a plain string) so existing products are never touched
-// just by managing this list. Renaming here also relabels matching products
-// (see the /categories PUT route); deleting only removes it from the list.
-model Category {
-  id         String   @id @default(cuid())
-  business   Business @relation(fields: [businessId], references: [id])
-  businessId String
-  name       String
-  createdAt  DateTime @default(now())
-
-  @@unique([businessId, name])
-  @@index([businessId])
-}
-
-enum StockMovementType {
-  SALE
-  PURCHASE
-  ADJUSTMENT
-  RETURN
-  OPENING
-}
-
-model StockMovement {
-  id         String            @id @default(cuid())
-  business   Business          @relation(fields: [businessId], references: [id])
-  businessId String
-  product    Product           @relation(fields: [productId], references: [id])
-  productId  String
-  type       StockMovementType
-  quantity   Decimal           @db.Decimal(12, 2) // positive = in, negative = out
-  reason     String?
-  reference  String?
-  createdBy  String?
-  createdAt  DateTime          @default(now())
-
-  @@index([businessId, productId])
-}
-
-model Customer {
-  id             String    @id @default(cuid())
-  business       Business  @relation(fields: [businessId], references: [id])
-  businessId     String
-  name           String
-  idNumber       String?
-  phone          String?
-  email          String?
-  address        String?
-  dateOfBirth    DateTime?
-  nextOfKinName  String?
-  nextOfKinPhone String?
-  notes          String?
-  balance        Decimal   @db.Decimal(12, 2) @default(0)
-  createdAt      DateTime  @default(now())
-
-  sales      Sale[]
-  invoices   Invoice[]
-  quotations Quotation[]
-
-  @@index([businessId])
-}
-
-model Supplier {
-  id         String     @id @default(cuid())
-  business   Business   @relation(fields: [businessId], references: [id])
-  businessId String
-  name       String
-  phone      String?
-  email      String?
-  address    String?
-  balance    Decimal    @db.Decimal(12, 2) @default(0)
-  createdAt  DateTime   @default(now())
-  purchases  Purchase[]
-
-  @@index([businessId])
-}
-
-enum SaleStatus {
-  COMPLETED
-  VOIDED
-  REFUNDED
-  HELD
-}
-
-enum PaymentMethod {
-  CASH
-  CARD
-  MOBILE_MONEY
-  ORANGE_MONEY
-  MYZAKA
-  SMEGA
-  BANK_TRANSFER
-  ACCOUNT
-  MIXED
-}
-
-model Sale {
-  id           String        @id @default(cuid())
-  business     Business      @relation(fields: [businessId], references: [id])
-  businessId   String
-  saleNumber   String
-  terminal     Terminal?     @relation(fields: [terminalId], references: [id])
-  terminalId   String?
-  cashier      User          @relation(fields: [cashierId], references: [id])
-  cashierId    String
-  customer     Customer?     @relation(fields: [customerId], references: [id])
-  customerId   String?
-  shift        Shift?        @relation(fields: [shiftId], references: [id])
-  shiftId      String?
-  items        SaleItem[]
-  laybuyPayments LaybuyPayment[]
-  subtotal     Decimal       @db.Decimal(12, 2)
-  taxTotal     Decimal       @db.Decimal(12, 2) @default(0)
-  discountTotal Decimal      @db.Decimal(12, 2) @default(0)
-  total        Decimal       @db.Decimal(12, 2)
-  amountPaid   Decimal       @db.Decimal(12, 2) @default(0)
-  changeDue    Decimal       @db.Decimal(12, 2) @default(0)
-  paymentMethod PaymentMethod @default(CASH)
-  status       SaleStatus    @default(COMPLETED)
-  // A client-generated id sent with the checkout request, used to make
-  // POST /sales idempotent — a sale rung up while offline (or retried after
-  // a dropped connection) can be safely replayed without ever creating a
-  // duplicate. Left null for older sales created before this existed.
-  clientRef    String?
-  createdAt    DateTime      @default(now())
-
-  @@index([businessId, createdAt])
-  @@unique([businessId, saleNumber])
-  @@unique([businessId, clientRef])
-}
-
-model SaleItem {
-  id         String   @id @default(cuid())
-  sale       Sale     @relation(fields: [saleId], references: [id])
-  saleId     String
-  product    Product  @relation(fields: [productId], references: [id])
-  productId  String
-  quantity   Decimal  @db.Decimal(12, 2)
-  unitPrice  Decimal  @db.Decimal(12, 2)
-  discount   Decimal  @db.Decimal(12, 2) @default(0)
-  taxAmount  Decimal  @db.Decimal(12, 2) @default(0)
-  total      Decimal  @db.Decimal(12, 2)
-}
-
-// Records each installment payment made toward an open laybuy (a Sale with
-// status HELD — deposit taken, stock reserved, item collected once paid
-// off). The Sale's own amountPaid/changeDue stay the running total so
-// receipts and the Laybuys list never need to sum anything themselves —
-// this table exists purely as the payment history / audit trail.
-model LaybuyPayment {
-  id            String        @id @default(cuid())
-  business      Business      @relation(fields: [businessId], references: [id])
-  businessId    String
-  sale          Sale          @relation(fields: [saleId], references: [id])
-  saleId        String
-  amount        Decimal       @db.Decimal(12, 2)
-  paymentMethod PaymentMethod @default(CASH)
-  createdBy     String?
-  createdAt     DateTime      @default(now())
-
-  @@index([businessId, saleId])
-}
-
-enum PurchaseStatus {
-  DRAFT
-  ORDERED
-  RECEIVED
-  CANCELLED
-}
-
-model Purchase {
-  id             String         @id @default(cuid())
-  business       Business       @relation(fields: [businessId], references: [id])
-  businessId     String
-  purchaseNumber String
-  supplier       Supplier       @relation(fields: [supplierId], references: [id])
-  supplierId     String
-  items          PurchaseItem[]
-  total          Decimal        @db.Decimal(12, 2)
-  status         PurchaseStatus @default(RECEIVED)
-  createdAt      DateTime       @default(now())
-
-  @@unique([businessId, purchaseNumber])
-}
-
-model PurchaseItem {
-  id         String   @id @default(cuid())
-  purchase   Purchase @relation(fields: [purchaseId], references: [id])
-  purchaseId String
-  product    Product  @relation(fields: [productId], references: [id])
-  productId  String
-  quantity   Decimal  @db.Decimal(12, 2)
-  unitCost   Decimal  @db.Decimal(12, 2)
-  total      Decimal  @db.Decimal(12, 2)
-}
-
-model Expense {
-  id          String   @id @default(cuid())
-  business    Business @relation(fields: [businessId], references: [id])
-  businessId  String
-  category    String
-  description String?
-  amount      Decimal  @db.Decimal(12, 2)
-  date        DateTime @default(now())
-  createdBy   String?
-  createdAt   DateTime @default(now())
-
-  @@index([businessId, date])
-}
-
-enum InvoiceStatus {
-  DRAFT
-  SENT
-  PARTIAL
-  PAID
-  OVERDUE
-  CANCELLED
-}
-
-model Invoice {
-  id            String        @id @default(cuid())
-  business      Business      @relation(fields: [businessId], references: [id])
-  businessId    String
-  invoiceNumber String
-  customer      Customer      @relation(fields: [customerId], references: [id])
-  customerId    String
-  items         Json // [{description, quantity, unitPrice, total}]
-  subtotal      Decimal       @db.Decimal(12, 2)
-  taxTotal      Decimal       @db.Decimal(12, 2) @default(0)
-  total         Decimal       @db.Decimal(12, 2)
-  amountPaid    Decimal       @db.Decimal(12, 2) @default(0)
-  dueDate       DateTime?
-  status        InvoiceStatus @default(DRAFT)
-  createdAt     DateTime      @default(now())
-
-  @@unique([businessId, invoiceNumber])
-}
-
-enum QuotationStatus {
-  DRAFT
-  SENT
-  ACCEPTED
-  DECLINED
-  EXPIRED
-  CONVERTED
-}
-
-model Quotation {
-  id          String          @id @default(cuid())
-  business    Business        @relation(fields: [businessId], references: [id])
-  businessId  String
-  quoteNumber String
-  customer    Customer?       @relation(fields: [customerId], references: [id])
-  customerId  String?
-  items       Json
-  subtotal    Decimal         @db.Decimal(12, 2)
-  taxTotal    Decimal         @db.Decimal(12, 2) @default(0)
-  total       Decimal         @db.Decimal(12, 2)
-  validUntil  DateTime?
-  status      QuotationStatus @default(DRAFT)
-  createdAt   DateTime        @default(now())
-
-  @@unique([businessId, quoteNumber])
-}
-
-enum ShiftStatus {
-  OPEN
-  CLOSED
-}
-
-model Shift {
-  id              String      @id @default(cuid())
-  business        Business    @relation(fields: [businessId], references: [id])
-  businessId      String
-  terminal        Terminal?   @relation(fields: [terminalId], references: [id])
-  terminalId      String?
-  cashier         User        @relation(fields: [cashierId], references: [id])
-  cashierId       String
-  openingBalance  Decimal     @db.Decimal(12, 2) @default(0)
-  closingBalance  Decimal?    @db.Decimal(12, 2)
-  expectedBalance Decimal?    @db.Decimal(12, 2)
-  status          ShiftStatus @default(OPEN)
-  openedAt        DateTime    @default(now())
-  closedAt        DateTime?
-  sales           Sale[]
-  cashMovements   CashMovement[]
-
-  @@index([businessId, status])
-}
-
-enum CashMovementType {
-  CASH_IN
-  CASH_OUT
-}
-
-model CashMovement {
-  id         String           @id @default(cuid())
-  business   Business         @relation(fields: [businessId], references: [id])
-  businessId String
-  shift      Shift            @relation(fields: [shiftId], references: [id])
-  shiftId    String
-  type       CashMovementType
-  amount     Decimal          @db.Decimal(12, 2)
-  reason     String?
-  createdBy  User             @relation(fields: [createdById], references: [id])
-  createdById String
-  createdAt  DateTime         @default(now())
+/**
+ * Replays every queued sale for this business, oldest first. A sale the
+ * server actually rejects (stock ran out before it synced, license lapsed,
+ * etc.) is left in the queue with its error recorded rather than silently
+ * dropped, so nothing is ever lost — it just needs someone to look at it. A
+ * plain network failure mid-run stops the loop immediately instead of
+ * burning through the rest of the queue while still offline.
+ */
+export async function syncQueuedSales(businessId: string): Promise<{ synced: number; failed: number }> {
+  const queue = getQueuedSales(businessId);
+  let synced = 0;
+  let failed = 0;
+  for (const item of queue) {
+    try {
+      await api.post("/sales", item.payload);
+      removeQueuedSale(businessId, item.clientRef);
+      synced++;
+    } catch (err) {
+      if (err instanceof ApiRequestError) {
+        updateQueuedSale(businessId, item.clientRef, { lastError: err.message });
+        failed++;
+      } else {
+        break; // network failure — likely offline again, stop and retry later
+      }
+    }
+  }
+  return { synced, failed };
 }

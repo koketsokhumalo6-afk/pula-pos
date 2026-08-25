@@ -35,23 +35,33 @@ const AuthContext = createContext<AuthState | null>(null);
 
 const STORAGE_KEY = "pula_session";
 
+/** Reads the saved session synchronously so the very first render already
+ * has the right user/business — restoring it inside a useEffect instead
+ * left a one-render gap where `user` was still null, during which
+ * ProtectedRoute would see "not authenticated" and redirect to /login
+ * before the restore ever ran. That gap only bit on a full page load
+ * (a plain <a href> link, a bookmark, or a manual browser refresh), which
+ * is exactly why it looked like login "randomly" kicked in. */
+function readStoredSession(): { user: AuthUser | null; business: AuthBusiness | null } {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return { user: parsed.user ?? null, business: parsed.business ?? null };
+    }
+  } catch {
+    /* ignore corrupt storage */
+  }
+  return { user: null, business: null };
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(null);
-  const [business, setBusiness] = useState<AuthBusiness | null>(null);
+  const [user, setUser] = useState<AuthUser | null>(() => readStoredSession().user);
+  const [business, setBusiness] = useState<AuthBusiness | null>(() => readStoredSession().business);
   const [permissions, setPermissions] = useState<Record<PermissionRole, PermissionMap> | null>(null);
   const [permissionsLoaded, setPermissionsLoaded] = useState(false);
 
   useEffect(() => {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      try {
-        const parsed = JSON.parse(raw);
-        setUser(parsed.user);
-        setBusiness(parsed.business);
-      } catch {
-        /* ignore corrupt storage */
-      }
-    }
     setUnauthorizedHandler(() => logout());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

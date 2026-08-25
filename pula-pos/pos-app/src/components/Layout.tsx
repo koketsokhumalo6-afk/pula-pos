@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { LicenseBanner } from "./LicenseBanner";
+import { OfflineBanner } from "./OfflineBanner";
 import { api } from "../lib/api";
 import type { PermissionSection } from "../lib/permissions";
 
@@ -66,6 +67,7 @@ export function Layout() {
             </button>
           </div>
         </div>
+        <OfflineBanner />
         <LicenseBanner />
         <div className="content">
           <Outlet />

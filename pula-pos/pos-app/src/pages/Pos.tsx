@@ -56,7 +56,8 @@ interface RecentSale {
 }
 
 export function PosPage() {
-  const { business, user } = useAuth();
+  const { business, user, can } = useAuth();
+  const canLaybuy = can("laybuys");
   const [receiptSale, setReceiptSale] = useState<ReceiptData | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [managedCategories, setManagedCategories] = useState<{ id: string; name: string }[]>([]);
@@ -363,17 +364,19 @@ export function PosPage() {
             </select>
           </div>
 
-          <div className="field" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              id="isLaybuy"
-              checked={isLaybuy}
-              onChange={(e) => setIsLaybuy(e.target.checked)}
-              style={{ width: "auto" }}
-            />
-            <label htmlFor="isLaybuy" style={{ margin: 0 }}>This is a Laybuy</label>
-          </div>
-          {isLaybuy && (
+          {canLaybuy && (
+            <div className="field" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                type="checkbox"
+                id="isLaybuy"
+                checked={isLaybuy}
+                onChange={(e) => setIsLaybuy(e.target.checked)}
+                style={{ width: "auto" }}
+              />
+              <label htmlFor="isLaybuy" style={{ margin: 0 }}>This is a Laybuy</label>
+            </div>
+          )}
+          {canLaybuy && isLaybuy && (
             <p className="muted" style={{ marginTop: -6, marginBottom: 10, fontSize: 12.5 }}>
               Stock is reserved now. Pick the customer above, then enter their deposit below — they collect once it's
               paid off from Sales → Laybuys.

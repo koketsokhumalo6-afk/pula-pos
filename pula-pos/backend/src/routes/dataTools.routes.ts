@@ -89,8 +89,19 @@ dataToolsRouter.get(
       orderBy: { name: "asc" },
     });
     const csv = toCsv(
-      ["name", "phone", "email", "address", "balance"],
-      customers.map((c) => ({ name: c.name, phone: c.phone || "", email: c.email || "", address: c.address || "", balance: c.balance }))
+      ["name", "idNumber", "phone", "email", "address", "dateOfBirth", "nextOfKinName", "nextOfKinPhone", "notes", "balance"],
+      customers.map((c) => ({
+        name: c.name,
+        idNumber: c.idNumber || "",
+        phone: c.phone || "",
+        email: c.email || "",
+        address: c.address || "",
+        dateOfBirth: c.dateOfBirth ? c.dateOfBirth.toISOString() : "",
+        nextOfKinName: c.nextOfKinName || "",
+        nextOfKinPhone: c.nextOfKinPhone || "",
+        notes: c.notes || "",
+        balance: c.balance,
+      }))
     );
     sendCsv(res, "customers.csv", csv);
   })
@@ -133,6 +144,160 @@ dataToolsRouter.get(
       }))
     );
     sendCsv(res, "purchases.csv", csv);
+  })
+);
+
+dataToolsRouter.get(
+  "/export/expenses.csv",
+  CAN_USE_DATA_TOOLS,
+  asyncHandler(async (req, res) => {
+    const expenses = await prisma.expense.findMany({
+      where: { businessId: req.auth!.businessId },
+      orderBy: { date: "desc" },
+      take: 10000,
+    });
+    const csv = toCsv(
+      ["date", "category", "description", "amount"],
+      expenses.map((e) => ({
+        date: e.date.toISOString(),
+        category: e.category,
+        description: e.description || "",
+        amount: e.amount,
+      }))
+    );
+    sendCsv(res, "expenses.csv", csv);
+  })
+);
+
+dataToolsRouter.get(
+  "/export/invoices.csv",
+  CAN_USE_DATA_TOOLS,
+  asyncHandler(async (req, res) => {
+    const invoices = await prisma.invoice.findMany({
+      where: { businessId: req.auth!.businessId },
+      include: { customer: true },
+      orderBy: { createdAt: "desc" },
+      take: 10000,
+    });
+    const csv = toCsv(
+      ["invoiceNumber", "customer", "date", "dueDate", "status", "subtotal", "tax", "total", "amountPaid", "outstanding"],
+      invoices.map((i) => ({
+        invoiceNumber: i.invoiceNumber,
+        customer: i.customer?.name || "",
+        date: i.createdAt.toISOString(),
+        dueDate: i.dueDate ? i.dueDate.toISOString() : "",
+        status: i.status,
+        subtotal: i.subtotal,
+        tax: i.taxTotal,
+        total: i.total,
+        amountPaid: i.amountPaid,
+        outstanding: Number(i.total) - Number(i.amountPaid),
+      }))
+    );
+    sendCsv(res, "invoices.csv", csv);
+  })
+);
+
+dataToolsRouter.get(
+  "/export/quotations.csv",
+  CAN_USE_DATA_TOOLS,
+  asyncHandler(async (req, res) => {
+    const quotations = await prisma.quotation.findMany({
+      where: { businessId: req.auth!.businessId },
+      include: { customer: true },
+      orderBy: { createdAt: "desc" },
+      take: 10000,
+    });
+    const csv = toCsv(
+      ["quoteNumber", "customer", "date", "validUntil", "status", "subtotal", "tax", "total"],
+      quotations.map((q) => ({
+        quoteNumber: q.quoteNumber,
+        customer: q.customer?.name || "",
+        date: q.createdAt.toISOString(),
+        validUntil: q.validUntil ? q.validUntil.toISOString() : "",
+        status: q.status,
+        subtotal: q.subtotal,
+        tax: q.taxTotal,
+        total: q.total,
+      }))
+    );
+    sendCsv(res, "quotations.csv", csv);
+  })
+);
+
+/** Open laybuys only — a Sale with status HELD — with the outstanding
+ * balance still owed. Completed/voided laybuys already show up in the
+ * regular sales.csv export. */
+dataToolsRouter.get(
+  "/export/laybuys.csv",
+  CAN_USE_DATA_TOOLS,
+  asyncHandler(async (req, res) => {
+    const sales = await prisma.sale.findMany({
+      where: { businessId: req.auth!.businessId, status: "HELD" },
+      include: { customer: true },
+      orderBy: { createdAt: "desc" },
+      take: 10000,
+    });
+    const csv = toCsv(
+      ["saleNumber", "customer", "date", "total", "amountPaid", "balance"],
+      sales.map((s) => ({
+        saleNumber: s.saleNumber,
+        customer: s.customer?.name || "",
+        date: s.createdAt.toISOString(),
+        total: s.total,
+        amountPaid: s.amountPaid,
+        balance: Number(s.total) - Number(s.amountPaid),
+      }))
+    );
+    sendCsv(res, "laybuys.csv", csv);
+  })
+);
+
+dataToolsRouter.get(
+  "/export/staff.csv",
+  CAN_USE_DATA_TOOLS,
+  asyncHandler(async (req, res) => {
+    const staff = await prisma.user.findMany({
+      where: { businessId: req.auth!.businessId },
+      orderBy: { name: "asc" },
+    });
+    const csv = toCsv(
+      ["name", "email", "role", "status", "lastLoginAt"],
+      staff.map((u) => ({
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        status: u.status,
+        lastLoginAt: u.lastLoginAt ? u.lastLoginAt.toISOString() : "",
+      }))
+    );
+    sendCsv(res, "staff.csv", csv);
+  })
+);
+
+dataToolsRouter.get(
+  "/export/shifts.csv",
+  CAN_USE_DATA_TOOLS,
+  asyncHandler(async (req, res) => {
+    const shifts = await prisma.shift.findMany({
+      where: { businessId: req.auth!.businessId },
+      include: { cashier: { select: { name: true } } },
+      orderBy: { openedAt: "desc" },
+      take: 10000,
+    });
+    const csv = toCsv(
+      ["cashier", "openedAt", "closedAt", "openingBalance", "closingBalance", "expectedBalance", "status"],
+      shifts.map((s) => ({
+        cashier: s.cashier?.name || "",
+        openedAt: s.openedAt.toISOString(),
+        closedAt: s.closedAt ? s.closedAt.toISOString() : "",
+        openingBalance: s.openingBalance,
+        closingBalance: s.closingBalance ?? "",
+        expectedBalance: s.expectedBalance ?? "",
+        status: s.status,
+      }))
+    );
+    sendCsv(res, "shifts.csv", csv);
   })
 );
 

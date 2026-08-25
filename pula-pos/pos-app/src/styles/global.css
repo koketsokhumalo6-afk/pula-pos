@@ -94,6 +94,7 @@ label { display: block; font-size: 12.5px; font-weight: 600; color: var(--text-m
 .banner { padding: 10px 16px; font-size: 13px; border-bottom: 1px solid var(--border); }
 .banner-warning { background: #fff8e6; color: var(--warning); }
 .banner-danger { background: #fdecea; color: var(--danger); }
+.banner-info { background: #e8f1fb; color: #1c5a99; }
 
 .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 700; text-transform: uppercase; }
 .badge-green { background: #e6f4ea; color: var(--primary); }

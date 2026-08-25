@@ -77,3 +77,29 @@ staffRouter.put(
     res.json(user);
   })
 );
+
+const PASSWORD_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"; // no 0/O/1/l/I — easy to read back
+function generatePassword(length = 10): string {
+  let out = "";
+  for (let i = 0; i < length; i++) out += PASSWORD_CHARS[Math.floor(Math.random() * PASSWORD_CHARS.length)];
+  return out;
+}
+
+/**
+ * Generates a new random password for a staff account and returns it once,
+ * plaintext, so the owner/admin can hand it to that person directly — there
+ * is no other way to retrieve it afterward. Mainly for cashiers, whose
+ * passwords a manager may not otherwise have any way to reset.
+ */
+staffRouter.post(
+  "/:id/generate-password",
+  requireRole("OWNER", "ADMIN"),
+  asyncHandler(async (req, res) => {
+    const existing = await prisma.user.findFirst({ where: { id: req.params.id, businessId: req.auth!.businessId } });
+    if (!existing) throw notFound();
+    const password = generatePassword();
+    const passwordHash = await bcrypt.hash(password, 10);
+    await prisma.user.update({ where: { id: existing.id }, data: { passwordHash } });
+    res.json({ password });
+  })
+);

@@ -52,8 +52,9 @@ interface LaybuyDetail {
 }
 
 export function SalesPage() {
-  const { business, user } = useAuth();
+  const { business, user, can } = useAuth();
   const canVoid = !!user && CAN_VOID_ROLES.includes(user.role);
+  const canLaybuy = can("laybuys");
   const needsApproval = user?.role === "CASHIER";
 
   const [tab, setTab] = useState<"sales" | "laybuys">("sales");
@@ -242,9 +243,11 @@ export function SalesPage() {
         <button className={`btn ${tab === "sales" ? "btn-primary" : "btn-secondary"} btn-sm`} onClick={() => setTab("sales")}>
           Sales
         </button>
-        <button className={`btn ${tab === "laybuys" ? "btn-primary" : "btn-secondary"} btn-sm`} onClick={() => setTab("laybuys")}>
-          Laybuys{laybuyCount ? ` (${laybuyCount})` : ""}
-        </button>
+        {canLaybuy && (
+          <button className={`btn ${tab === "laybuys" ? "btn-primary" : "btn-secondary"} btn-sm`} onClick={() => setTab("laybuys")}>
+            Laybuys{laybuyCount ? ` (${laybuyCount})` : ""}
+          </button>
+        )}
       </div>
 
       {tab === "sales" && (
@@ -278,7 +281,7 @@ export function SalesPage() {
         </div>
       )}
 
-      {tab === "laybuys" && (
+      {canLaybuy && tab === "laybuys" && (
         <div className="card">
           <table>
             <thead><tr><th>Sale #</th><th>Customer</th><th>Total</th><th>Paid</th><th>Balance</th><th>Started</th><th></th></tr></thead>

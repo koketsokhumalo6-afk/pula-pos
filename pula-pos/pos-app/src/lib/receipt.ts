@@ -14,6 +14,7 @@ export interface ReceiptItem {
  * record when reprinting from Sales history. Kept separate from the API's
  * raw Sale shape so the receipt view doesn't care which source it came from. */
 export interface ReceiptData {
+  id: string;
   saleNumber: string;
   createdAt: string;
   cashierName: string;

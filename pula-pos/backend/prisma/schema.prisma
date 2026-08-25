@@ -138,6 +138,7 @@ model Business {
   quotations   Quotation[]
   shifts       Shift[]
   cashMovements CashMovement[]
+  laybuyPayments LaybuyPayment[]
 }
 
 enum UserRole {
@@ -315,6 +316,7 @@ model Sale {
   shift        Shift?        @relation(fields: [shiftId], references: [id])
   shiftId      String?
   items        SaleItem[]
+  laybuyPayments LaybuyPayment[]
   subtotal     Decimal       @db.Decimal(12, 2)
   taxTotal     Decimal       @db.Decimal(12, 2) @default(0)
   discountTotal Decimal      @db.Decimal(12, 2) @default(0)
@@ -340,6 +342,25 @@ model SaleItem {
   discount   Decimal  @db.Decimal(12, 2) @default(0)
   taxAmount  Decimal  @db.Decimal(12, 2) @default(0)
   total      Decimal  @db.Decimal(12, 2)
+}
+
+// Records each installment payment made toward an open laybuy (a Sale with
+// status HELD — deposit taken, stock reserved, item collected once paid
+// off). The Sale's own amountPaid/changeDue stay the running total so
+// receipts and the Laybuys list never need to sum anything themselves —
+// this table exists purely as the payment history / audit trail.
+model LaybuyPayment {
+  id            String        @id @default(cuid())
+  business      Business      @relation(fields: [businessId], references: [id])
+  businessId    String
+  sale          Sale          @relation(fields: [saleId], references: [id])
+  saleId        String
+  amount        Decimal       @db.Decimal(12, 2)
+  paymentMethod PaymentMethod @default(CASH)
+  createdBy     String?
+  createdAt     DateTime      @default(now())
+
+  @@index([businessId, saleId])
 }
 
 enum PurchaseStatus {

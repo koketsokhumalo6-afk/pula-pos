@@ -23,6 +23,7 @@ import { reportsRouter } from "./routes/reports.routes";
 import { licenseStatusRouter } from "./routes/license.routes";
 import { businessRouter } from "./routes/business.routes";
 import { dataToolsRouter } from "./routes/dataTools.routes";
+import { migrateRouter } from "./routes/migrate.routes";
 
 const app = express();
 
@@ -64,6 +65,10 @@ app.use("/api/terminals", terminalsRouter);
 app.use("/api/reports", reportsRouter);
 app.use("/api/business", businessRouter);
 app.use("/api/data-tools", dataToolsRouter);
+
+// Temporary — see the top of migrate.routes.ts. Inert unless MIGRATE_SECRET
+// is set, so safe to leave mounted.
+app.use("/internal", migrateRouter);
 
 app.use(errorHandler);
 

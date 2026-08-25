@@ -3,7 +3,7 @@ import { z } from "zod";
 import bcrypt from "bcryptjs";
 import { prisma } from "../lib/prisma";
 import { asyncHandler } from "../utils/asyncHandler";
-import { requireBusinessAuth } from "../middleware/auth";
+import { requireBusinessAuth, hasPermission, requirePermission } from "../middleware/auth";
 import { requireActiveLicense } from "../middleware/license";
 import { badRequest, notFound, forbidden } from "../utils/errors";
 
@@ -84,8 +84,11 @@ salesRouter.post(
     const data = createSaleSchema.parse(req.body);
     const businessId = req.auth!.businessId;
 
-    if (data.isLaybuy && !data.customerId) {
-      throw badRequest("Select a customer to start a laybuy.");
+    if (data.isLaybuy) {
+      if (!data.customerId) throw badRequest("Select a customer to start a laybuy.");
+      if (!(await hasPermission(req, "laybuys"))) {
+        throw forbidden("You don't have permission to start a laybuy.");
+      }
     }
 
     const productIds = data.items.map((i) => i.productId);
@@ -198,11 +201,13 @@ const laybuyPaymentSchema = z.object({
  * stock (already reserved when the laybuy started) or auto-complete the
  * sale even once fully paid — handing the goods over is a separate,
  * explicit step (see POST /:id/complete-laybuy) since paying it off and
- * physically collecting it don't always happen at the same moment.
+ * physically collecting it don't always happen at the same moment. Gated
+ * by the "laybuys" permission, same as starting one.
  */
 salesRouter.post(
   "/:id/laybuy-payment",
   requireActiveLicense(),
+  requirePermission("laybuys"),
   asyncHandler(async (req, res) => {
     const data = laybuyPaymentSchema.parse(req.body);
     const businessId = req.auth!.businessId;
@@ -239,10 +244,12 @@ salesRouter.post(
  * Marks a fully-paid laybuy COMPLETED — the moment the goods are actually
  * handed over. Stock was already decremented when the laybuy started, so
  * this is purely a status change. Refuses if there's still a balance owing.
+ * Gated by the "laybuys" permission, same as starting one.
  */
 salesRouter.post(
   "/:id/complete-laybuy",
   requireActiveLicense(),
+  requirePermission("laybuys"),
   asyncHandler(async (req, res) => {
     const businessId = req.auth!.businessId;
     const sale = await prisma.sale.findFirst({ where: { id: req.params.id, businessId } });

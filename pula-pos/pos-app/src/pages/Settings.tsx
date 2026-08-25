@@ -397,6 +397,42 @@ interface ImportResult {
   errors: { row: number; message: string }[];
 }
 
+interface RestoreResult {
+  restoredFrom: string | null;
+  counts: Record<string, number>;
+}
+
+/** Keys in a backup file that POST /data-tools/restore accepts, in the order shown in the UI. */
+const RESTORE_DATA_KEYS = [
+  "categories",
+  "products",
+  "suppliers",
+  "customers",
+  "terminals",
+  "shifts",
+  "purchases",
+  "sales",
+  "stockMovements",
+  "expenses",
+  "invoices",
+  "quotations",
+] as const;
+
+const RESTORE_LABELS: Record<string, string> = {
+  categories: "Categories",
+  products: "Products",
+  suppliers: "Suppliers",
+  customers: "Customers",
+  terminals: "Terminals",
+  shifts: "Shifts",
+  purchases: "Purchases",
+  sales: "Sales",
+  stockMovements: "Stock movements",
+  expenses: "Expenses",
+  invoices: "Invoices",
+  quotations: "Quotations",
+};
+
 function DataToolsSection() {
   const { user, business } = useAuth();
 
@@ -411,6 +447,14 @@ function DataToolsSection() {
 
   const [backingUp, setBackingUp] = useState(false);
   const [backupError, setBackupError] = useState<string | null>(null);
+
+  const [restoreFileName, setRestoreFileName] = useState("");
+  const [restoreData, setRestoreData] = useState<Record<string, unknown> | null>(null);
+  const [restorePreview, setRestorePreview] = useState<{ generatedAt: string | null; counts: Record<string, number> } | null>(null);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [restoreConfirmText, setRestoreConfirmText] = useState("");
+  const [restoring, setRestoring] = useState(false);
+  const [restoreResult, setRestoreResult] = useState<RestoreResult | null>(null);
 
   const stamp = () => new Date().toISOString().slice(0, 10);
 
@@ -490,6 +534,60 @@ function DataToolsSection() {
       setBackupError("Backup download failed — please try again.");
     } finally {
       setBackingUp(false);
+    }
+  }
+
+  function onRestoreFileSelected(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setRestoreError(null);
+    setRestoreResult(null);
+    setRestoreData(null);
+    setRestorePreview(null);
+    setRestoreConfirmText("");
+    setRestoreFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result || ""));
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !parsed.businessId) {
+          setRestoreError("That doesn't look like a Pula POS backup file.");
+          return;
+        }
+        const counts: Record<string, number> = {};
+        for (const key of RESTORE_DATA_KEYS) {
+          const v = (parsed as Record<string, unknown>)[key];
+          counts[key] = Array.isArray(v) ? v.length : 0;
+        }
+        setRestoreData(parsed);
+        setRestorePreview({
+          generatedAt: typeof parsed.generatedAt === "string" ? parsed.generatedAt : null,
+          counts,
+        });
+      } catch {
+        setRestoreError("Couldn't read that file — make sure it's an unmodified backup JSON file.");
+      }
+    };
+    reader.onerror = () => setRestoreError("Couldn't read that file.");
+    reader.readAsText(file);
+  }
+
+  async function runRestore() {
+    if (!restoreData) return;
+    setRestoring(true);
+    setRestoreError(null);
+    try {
+      const result = await api.post<RestoreResult>("/data-tools/restore", restoreData);
+      setRestoreResult(result);
+      setRestoreData(null);
+      setRestorePreview(null);
+      setRestoreFileName("");
+      setRestoreConfirmText("");
+    } catch (err) {
+      setRestoreError(err instanceof ApiRequestError ? err.message : "Restore failed — nothing was changed.");
+    } finally {
+      setRestoring(false);
     }
   }
 
@@ -591,6 +689,69 @@ function DataToolsSection() {
           </>
         ) : (
           <p className="muted">Only the business owner can download a full backup.</p>
+        )}
+      </div>
+
+      <div style={{ borderTop: "1px solid var(--border)", paddingTop: 18, marginTop: 18 }}>
+        <h4 style={{ marginBottom: 6 }}>Restore from Backup</h4>
+        <p className="muted" style={{ marginTop: 0, marginBottom: 10 }}>
+          Upload a backup file you downloaded above to bring {business?.name || "this business"}'s data back to that
+          point in time.
+        </p>
+        {user?.role === "OWNER" ? (
+          <>
+            <p className="muted" style={{ marginTop: 0, marginBottom: 10, fontSize: 12.5 }}>
+              This replaces products, categories, customers, suppliers, sales, purchases, expenses, invoices,
+              quotations, shifts and stock history with what's in the file — it cannot be undone. Staff accounts,
+              passwords, and this business's profile and license are not affected.
+            </p>
+            <input type="file" accept=".json,application/json" onChange={onRestoreFileSelected} />
+            {restoreFileName && restorePreview && (
+              <div style={{ marginTop: 12, padding: 12, background: "rgba(0,0,0,0.03)", borderRadius: 8, fontSize: 13 }}>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>{restoreFileName}</div>
+                <div className="muted" style={{ marginBottom: 8 }}>
+                  {restorePreview.generatedAt
+                    ? `Backed up ${new Date(restorePreview.generatedAt).toLocaleString()}`
+                    : "Backup date unknown"}
+                </div>
+                <ul style={{ margin: "0 0 10px 18px", padding: 0 }}>
+                  {RESTORE_DATA_KEYS.filter((k) => restorePreview.counts[k] > 0).map((k) => (
+                    <li key={k}>
+                      {RESTORE_LABELS[k]}: {restorePreview.counts[k]}
+                    </li>
+                  ))}
+                </ul>
+                <div className="error-text" style={{ marginBottom: 8 }}>
+                  This is destructive and cannot be undone. Everything listed above will replace what's currently in
+                  {business?.name ? ` ${business.name}` : " this business"}.
+                </div>
+                <div className="field" style={{ marginBottom: 8 }}>
+                  <label>Type "{business?.name || ""}" to confirm</label>
+                  <input value={restoreConfirmText} onChange={(e) => setRestoreConfirmText(e.target.value)} />
+                </div>
+                <button
+                  className="btn btn-danger btn-sm"
+                  onClick={runRestore}
+                  disabled={restoring || !business?.name || restoreConfirmText.trim() !== business.name.trim()}
+                >
+                  {restoring ? "Restoring…" : "Restore Now"}
+                </button>
+              </div>
+            )}
+            {restoreError && <div className="error-text" style={{ marginTop: 8 }}>{restoreError}</div>}
+            {restoreResult && (
+              <div style={{ marginTop: 10, fontSize: 13, color: "#146c43" }}>
+                Restored
+                {restoreResult.restoredFrom ? ` from backup dated ${new Date(restoreResult.restoredFrom).toLocaleString()}` : ""}:{" "}
+                {RESTORE_DATA_KEYS.filter((k) => (restoreResult.counts[k] || 0) > 0)
+                  .map((k) => `${restoreResult.counts[k]} ${RESTORE_LABELS[k].toLowerCase()}`)
+                  .join(", ") || "nothing to restore"}
+                .
+              </div>
+            )}
+          </>
+        ) : (
+          <p className="muted">Only the business owner can restore from a backup.</p>
         )}
       </div>
     </div>

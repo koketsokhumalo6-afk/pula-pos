@@ -74,3 +74,34 @@ export function csvRowsToObjects(rows: string[][]): Record<string, string>[] {
     return obj;
   });
 }
+
+function escapeCsvField(value: unknown): string {
+  const s = value === null || value === undefined ? "" : String(value);
+  if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+/** Builds a CSV string from column headers + row arrays, entirely
+ * client-side — for report data that's already been fetched and summarized
+ * (top products, staff performance, …) and so has no dedicated backend
+ * export endpoint of its own. Mirrors the backend's toCsv escaping rules. */
+export function buildCsv(columns: string[], rows: (string | number)[][]): string {
+  const lines = [columns.map(escapeCsvField).join(",")];
+  for (const row of rows) lines.push(row.map(escapeCsvField).join(","));
+  return lines.join("\r\n") + "\r\n";
+}
+
+/** Triggers a browser download of an in-memory CSV string — the
+ * client-generated counterpart to lib/download.ts's downloadFile, which
+ * fetches a CSV from an authenticated API endpoint instead. */
+export function saveCsv(filename: string, csv: string) {
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}

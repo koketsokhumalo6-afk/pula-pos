@@ -88,7 +88,19 @@ migrateRouter.post(
           if (!cols.length) continue;
           const colList = cols.map((c) => `"${c}"`).join(", ");
           const placeholders = cols.map((_, i) => `$${i + 1}`).join(", ");
-          const values = cols.map((c) => row[c]);
+          // Postgres already parsed any json/jsonb column into a real JS
+          // object/array. node-pg's own parameter serialization treats a
+          // plain JS array as a SQL array literal (comma-joined, not JSON),
+          // which corrupts json columns that hold arrays (e.g. Invoice.items,
+          // Quotation.items) — "invalid input syntax for type json". Re-stringify
+          // any object/array value ourselves so it round-trips as valid JSON text.
+          const values = cols.map((c) => {
+            const v = row[c];
+            if (v !== null && typeof v === "object" && !(v instanceof Date) && !Buffer.isBuffer(v)) {
+              return JSON.stringify(v);
+            }
+            return v;
+          });
           await dest.query(
             `INSERT INTO "${table}" (${colList}) VALUES (${placeholders}) ON CONFLICT DO NOTHING`,
             values

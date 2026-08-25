@@ -251,15 +251,20 @@ model StockMovement {
 }
 
 model Customer {
-  id         String   @id @default(cuid())
-  business   Business @relation(fields: [businessId], references: [id])
-  businessId String
-  name       String
-  phone      String?
-  email      String?
-  address    String?
-  balance    Decimal  @db.Decimal(12, 2) @default(0)
-  createdAt  DateTime @default(now())
+  id             String    @id @default(cuid())
+  business       Business  @relation(fields: [businessId], references: [id])
+  businessId     String
+  name           String
+  idNumber       String?
+  phone          String?
+  email          String?
+  address        String?
+  dateOfBirth    DateTime?
+  nextOfKinName  String?
+  nextOfKinPhone String?
+  notes          String?
+  balance        Decimal   @db.Decimal(12, 2) @default(0)
+  createdAt      DateTime  @default(now())
 
   sales      Sale[]
   invoices   Invoice[]

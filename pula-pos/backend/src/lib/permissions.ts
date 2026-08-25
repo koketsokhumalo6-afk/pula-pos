@@ -4,6 +4,12 @@
  * Point of Sale aren't included either; those two stay open to every
  * signed-in role no matter what, since POS is the core function of the app
  * and Dashboard is the universal post-login landing page.
+ *
+ * "laybuys" is the one entry here that isn't a page — it gates the specific
+ * action of starting a laybuy sale, recording a laybuy payment, or
+ * completing one (from the POS checkout and the Sales → Laybuys tab), not
+ * a sidebar link. Cancelling a laybuy is unaffected — that already goes
+ * through the separate manager-override flow, same as voiding any sale.
  */
 export const PERMISSION_SECTIONS = [
   "dashboard",
@@ -13,6 +19,7 @@ export const PERMISSION_SECTIONS = [
   "customers",
   "suppliers",
   "sales",
+  "laybuys",
   "purchases",
   "expenses",
   "invoices",
@@ -50,6 +57,7 @@ export const DEFAULT_PERMISSIONS: Record<PermissionRole, PermissionMap> = {
     customers: false,
     suppliers: false,
     sales: true,
+    laybuys: true,
     purchases: false,
     expenses: false,
     invoices: false,

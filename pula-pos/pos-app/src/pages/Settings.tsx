@@ -520,7 +520,17 @@ function DataToolsSection() {
           {exportBtn("customers", "Customers", "/data-tools/export/customers.csv", `customers-${stamp()}.csv`)}
           {exportBtn("suppliers", "Suppliers", "/data-tools/export/suppliers.csv", `suppliers-${stamp()}.csv`)}
           {exportBtn("purchases", "Purchases", "/data-tools/export/purchases.csv", `purchases-${stamp()}.csv`)}
+          {exportBtn("expenses", "Expenses", "/data-tools/export/expenses.csv", `expenses-${stamp()}.csv`)}
+          {exportBtn("invoices", "Invoices", "/data-tools/export/invoices.csv", `invoices-${stamp()}.csv`)}
+          {exportBtn("quotations", "Quotations", "/data-tools/export/quotations.csv", `quotations-${stamp()}.csv`)}
+          {exportBtn("laybuys", "Laybuys", "/data-tools/export/laybuys.csv", `laybuys-${stamp()}.csv`)}
+          {exportBtn("staff", "Staff", "/data-tools/export/staff.csv", `staff-${stamp()}.csv`)}
+          {exportBtn("shifts", "Shifts", "/data-tools/export/shifts.csv", `shifts-${stamp()}.csv`)}
         </div>
+        <p className="muted" style={{ marginTop: 10, marginBottom: 0, fontSize: 12.5 }}>
+          Want charts and summaries instead of raw rows? The Reports page has a CSV and PDF download for every
+          report, plus one button for a full combined report.
+        </p>
         {exportError && <div className="error-text">{exportError}</div>}
       </div>
 

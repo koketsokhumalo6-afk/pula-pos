@@ -33,7 +33,10 @@ app.use(
     credentials: true,
   })
 );
-app.use(express.json({ limit: "2mb" }));
+// 20mb (not the previous 2mb) so a business's own full data backup can be
+// posted back in through POST /data-tools/restore — a mature business's
+// sales/purchase history can add up.
+app.use(express.json({ limit: "20mb" }));
 app.use(rateLimit({ windowMs: 60_000, max: 300 }));
 
 app.get("/health", (_req, res) => res.json({ ok: true, service: "pula-pos-api" }));

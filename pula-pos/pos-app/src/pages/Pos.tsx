@@ -71,6 +71,11 @@ export function PosPage() {
   const [success, setSuccess] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  // Laybuy: the customer pays a deposit now, stock is reserved immediately,
+  // and they collect (and the sale only counts as COMPLETED) once it's paid
+  // off from the Laybuys tab on the Sales page.
+  const [isLaybuy, setIsLaybuy] = useState(false);
+
   // "Void a Sale" — a standing option on this screen (not just the receipt
   // shown right after checkout) so a sale from earlier in the shift can be
   // voided without leaving the register. Same manager-override rule applies:
@@ -145,15 +150,38 @@ export function PosPage() {
     if (!cart.length) return;
     setError(null);
     setSuccess(null);
+
+    if (isLaybuy) {
+      if (!customerId) {
+        setError("Select a customer to start a laybuy.");
+        return;
+      }
+      if (!paid) {
+        setError("Enter a deposit amount.");
+        return;
+      }
+      if (paid >= totals.total) {
+        setError("A deposit can't cover the full total — that's just a regular sale. Uncheck Laybuy to charge in full.");
+        return;
+      }
+    }
+
+    const amountToRecord = isLaybuy ? paid : paid || totals.total;
+
     setSubmitting(true);
     try {
       const sale = await api.post<{ id: string; saleNumber: string; createdAt: string }>("/sales", {
         items: cart.map((l) => ({ productId: l.product.id, quantity: l.quantity, unitPrice: Number(l.product.sellPrice), discount: l.discount })),
         customerId: customerId || undefined,
-        amountPaid: paid || totals.total,
+        amountPaid: amountToRecord,
         paymentMethod,
+        isLaybuy,
       });
-      setSuccess(`Sale ${sale.saleNumber} completed.`);
+      setSuccess(
+        isLaybuy
+          ? `Laybuy ${sale.saleNumber} started — deposit recorded. Manage it from Sales → Laybuys.`
+          : `Sale ${sale.saleNumber} completed.`
+      );
       // Built from the cart still in memory rather than re-fetching — the
       // sale response doesn't include product names, and this data is only
       // needed for the receipt shown immediately after checkout.
@@ -175,11 +203,12 @@ export function PosPage() {
         discountTotal: totals.discountTotal,
         taxTotal: totals.taxTotal,
         total: totals.total,
-        amountPaid: paid || totals.total,
+        amountPaid: amountToRecord,
         changeDue,
       });
       setCart([]);
       setAmountPaid("");
+      setIsLaybuy(false);
       loadProducts();
     } catch (err) {
       setError(err instanceof ApiRequestError ? err.message : "Checkout failed");
@@ -325,7 +354,7 @@ export function PosPage() {
           </div>
 
           <div className="field" style={{ marginTop: 10 }}>
-            <label>Customer (optional)</label>
+            <label>Customer {isLaybuy ? "*" : "(optional)"}</label>
             <select value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
               <option value="">Walk-in customer</option>
               {customers.map((c) => (
@@ -333,6 +362,23 @@ export function PosPage() {
               ))}
             </select>
           </div>
+
+          <div className="field" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              id="isLaybuy"
+              checked={isLaybuy}
+              onChange={(e) => setIsLaybuy(e.target.checked)}
+              style={{ width: "auto" }}
+            />
+            <label htmlFor="isLaybuy" style={{ margin: 0 }}>This is a Laybuy</label>
+          </div>
+          {isLaybuy && (
+            <p className="muted" style={{ marginTop: -6, marginBottom: 10, fontSize: 12.5 }}>
+              Stock is reserved now. Pick the customer above, then enter their deposit below — they collect once it's
+              paid off from Sales → Laybuys.
+            </p>
+          )}
 
           <div className="field">
             <label>Payment method</label>
@@ -344,8 +390,14 @@ export function PosPage() {
           </div>
 
           <div className="field">
-            <label>Amount paid</label>
-            <input type="number" min={0} placeholder={totals.total.toFixed(2)} value={amountPaid} onChange={(e) => setAmountPaid(e.target.value)} />
+            <label>{isLaybuy ? "Deposit amount *" : "Amount paid"}</label>
+            <input
+              type="number"
+              min={0}
+              placeholder={isLaybuy ? "0.00" : totals.total.toFixed(2)}
+              value={amountPaid}
+              onChange={(e) => setAmountPaid(e.target.value)}
+            />
           </div>
 
           <div className="cart-totals">
@@ -353,14 +405,21 @@ export function PosPage() {
             <div className="row"><span>Discount</span><span>-{money(totals.discountTotal, business?.currency)}</span></div>
             <div className="row"><span>Tax</span><span>{money(totals.taxTotal, business?.currency)}</span></div>
             <div className="row total"><span>Total</span><span>{money(totals.total, business?.currency)}</span></div>
-            {paid > 0 && <div className="row"><span>Change due</span><span>{money(changeDue, business?.currency)}</span></div>}
+            {!isLaybuy && paid > 0 && <div className="row"><span>Change due</span><span>{money(changeDue, business?.currency)}</span></div>}
+            {isLaybuy && paid > 0 && (
+              <div className="row"><span>Balance after deposit</span><span>{money(Math.max(0, totals.total - paid), business?.currency)}</span></div>
+            )}
           </div>
 
           {error && <div className="error-text">{error}</div>}
           {success && <div style={{ color: "#146c43", fontSize: 13, margin: "8px 0" }}>{success}</div>}
 
           <button className="btn btn-primary" style={{ marginTop: 10, justifyContent: "center" }} disabled={!cart.length || submitting} onClick={checkout}>
-            {submitting ? "Processing…" : `Charge ${money(totals.total, business?.currency)}`}
+            {submitting
+              ? "Processing…"
+              : isLaybuy
+              ? `Start Laybuy (Deposit ${money(paid || 0, business?.currency)})`
+              : `Charge ${money(totals.total, business?.currency)}`}
           </button>
         </div>
       </div>

@@ -18,6 +18,7 @@ import { StaffPage } from "./pages/Staff";
 import { SettingsPage } from "./pages/Settings";
 import { Layout } from "./components/Layout";
 import { ProtectedRoute } from "./components/ProtectedRoute";
+import { RequireSection } from "./components/RequireSection";
 
 export default function App() {
   return (
@@ -30,22 +31,22 @@ export default function App() {
           </ProtectedRoute>
         }
       >
-        <Route path="/" element={<DashboardPage />} />
+        <Route path="/" element={<RequireSection section="dashboard"><DashboardPage /></RequireSection>} />
         <Route path="/pos" element={<PosPage />} />
-        <Route path="/products" element={<ProductsPage />} />
-        <Route path="/categories" element={<CategoriesPage />} />
-        <Route path="/stock" element={<StockPage />} />
-        <Route path="/customers" element={<CustomersPage />} />
-        <Route path="/suppliers" element={<SuppliersPage />} />
-        <Route path="/sales" element={<SalesPage />} />
-        <Route path="/purchases" element={<PurchasesPage />} />
-        <Route path="/expenses" element={<ExpensesPage />} />
-        <Route path="/invoices" element={<InvoicesPage />} />
-        <Route path="/quotations" element={<QuotationsPage />} />
-        <Route path="/shifts" element={<ShiftsPage />} />
-        <Route path="/reports" element={<ReportsPage />} />
-        <Route path="/staff" element={<StaffPage />} />
-        <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/products" element={<RequireSection section="products"><ProductsPage /></RequireSection>} />
+        <Route path="/categories" element={<RequireSection section="categories"><CategoriesPage /></RequireSection>} />
+        <Route path="/stock" element={<RequireSection section="stock"><StockPage /></RequireSection>} />
+        <Route path="/customers" element={<RequireSection section="customers"><CustomersPage /></RequireSection>} />
+        <Route path="/suppliers" element={<RequireSection section="suppliers"><SuppliersPage /></RequireSection>} />
+        <Route path="/sales" element={<RequireSection section="sales"><SalesPage /></RequireSection>} />
+        <Route path="/purchases" element={<RequireSection section="purchases"><PurchasesPage /></RequireSection>} />
+        <Route path="/expenses" element={<RequireSection section="expenses"><ExpensesPage /></RequireSection>} />
+        <Route path="/invoices" element={<RequireSection section="invoices"><InvoicesPage /></RequireSection>} />
+        <Route path="/quotations" element={<RequireSection section="quotations"><QuotationsPage /></RequireSection>} />
+        <Route path="/shifts" element={<RequireSection section="shifts"><ShiftsPage /></RequireSection>} />
+        <Route path="/reports" element={<RequireSection section="reports"><ReportsPage /></RequireSection>} />
+        <Route path="/staff" element={<RequireSection section="staff"><StaffPage /></RequireSection>} />
+        <Route path="/settings" element={<RequireSection section="settings"><SettingsPage /></RequireSection>} />
       </Route>
     </Routes>
   );

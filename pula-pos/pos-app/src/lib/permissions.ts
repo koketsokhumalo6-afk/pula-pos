@@ -1,6 +1,11 @@
 /** Mirrors backend/src/lib/permissions.ts — the configurable per-role page
  * access sections. Dashboard and Point of Sale aren't included; those stay
- * open to every signed-in role regardless of configuration. */
+ * open to every signed-in role regardless of configuration.
+ *
+ * "laybuys" isn't a page — it gates starting a laybuy sale on the POS
+ * screen and the Laybuys tab on the Sales page (recording payments,
+ * completing). Cancelling a laybuy still goes through the separate
+ * manager-override flow regardless of this setting. */
 export const PERMISSION_SECTIONS = [
   "dashboard",
   "products",
@@ -9,6 +14,7 @@ export const PERMISSION_SECTIONS = [
   "customers",
   "suppliers",
   "sales",
+  "laybuys",
   "purchases",
   "expenses",
   "invoices",
@@ -31,6 +37,7 @@ export const SECTION_LABELS: Record<PermissionSection, string> = {
   customers: "Customers",
   suppliers: "Suppliers",
   sales: "Sales",
+  laybuys: "Laybuys (start & manage)",
   purchases: "Purchases",
   expenses: "Expenses",
   invoices: "Invoices",

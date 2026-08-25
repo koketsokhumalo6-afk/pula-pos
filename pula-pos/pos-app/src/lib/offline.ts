@@ -1,0 +1,521 @@
+// Pula POS — Multi-tenant SaaS data model
+// PostgreSQL, managed/hosted by the server (no local install for customers).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// PLATFORM LEVEL (Master Admin — Pula POS operator, not a business tenant)
+// ---------------------------------------------------------------------------
+
+enum SuperAdminRole {
+  OWNER
+  SUPPORT
+}
+
+model SuperAdmin {
+  id           String         @id @default(cuid())
+  name         String
+  email        String         @unique
+  passwordHash String
+  role         SuperAdminRole @default(SUPPORT)
+  createdAt    DateTime       @default(now())
+  lastLoginAt  DateTime?
+}
+
+enum PlanCode {
+  STARTER
+  STANDARD
+  PRO
+  ENTERPRISE
+}
+
+model Plan {
+  id          String    @id @default(cuid())
+  code        PlanCode  @unique
+  name        String
+  maxUsers    Int
+  maxTerminals Int
+  priceYearly Decimal   @db.Decimal(12, 2)
+  currency    String    @default("BWP")
+  features    Json?
+  isActive    Boolean   @default(true)
+  licenses    License[]
+  createdAt   DateTime  @default(now())
+}
+
+enum LicenseStatus {
+  PENDING
+  ACTIVE
+  EXPIRED
+  SUSPENDED
+  CANCELLED
+}
+
+model License {
+  id             String        @id @default(cuid())
+  business       Business      @relation(fields: [businessId], references: [id])
+  businessId     String        @unique
+  licenseKey     String        @unique // format: PULA-YYYY-XXXX-XXXX
+  plan           Plan          @relation(fields: [planId], references: [id])
+  planId         String
+  status         LicenseStatus @default(PENDING)
+  activationDate DateTime?
+  expiryDate     DateTime?
+  maxUsers       Int
+  maxTerminals   Int
+  notes          String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  history        LicenseEvent[]
+}
+
+enum LicenseEventType {
+  CREATED
+  ACTIVATED
+  RENEWED
+  SUSPENDED
+  REINSTATED
+  EXPIRED
+  EXTENDED
+  PLAN_CHANGED
+  CANCELLED
+}
+
+model LicenseEvent {
+  id        String           @id @default(cuid())
+  license   License          @relation(fields: [licenseId], references: [id])
+  licenseId String
+  type      LicenseEventType
+  detail    String?
+  actor     String? // super admin email/id who performed the action
+  createdAt DateTime         @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// TENANT LEVEL (each Business = one customer account, fully isolated by businessId)
+// ---------------------------------------------------------------------------
+
+enum BusinessStatus {
+  ACTIVE
+  SUSPENDED
+  ARCHIVED
+}
+
+model Business {
+  id           String         @id @default(cuid())
+  name         String
+  tradingName  String?
+  email        String         @unique
+  phone        String?
+  address      String?
+  taxNumber    String?
+  currency     String         @default("BWP")
+  status       BusinessStatus @default(ACTIVE)
+  logoUrl      String?        @db.Text // base64 data URL — small logos stored directly, no file storage service needed
+  permissions  Json?          // per-role page access overrides, see backend/src/lib/permissions.ts
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  license      License?
+  users        User[]
+  terminals    Terminal[]
+  products     Product[]
+  categories   Category[]
+  stockMovements StockMovement[]
+  customers    Customer[]
+  suppliers    Supplier[]
+  sales        Sale[]
+  purchases    Purchase[]
+  expenses     Expense[]
+  invoices     Invoice[]
+  quotations   Quotation[]
+  shifts       Shift[]
+  cashMovements CashMovement[]
+  laybuyPayments LaybuyPayment[]
+}
+
+enum UserRole {
+  OWNER
+  ADMIN
+  MANAGER
+  CASHIER
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model User {
+  id           String     @id @default(cuid())
+  business     Business   @relation(fields: [businessId], references: [id])
+  businessId   String
+  name         String
+  email        String
+  passwordHash String
+  role         UserRole   @default(CASHIER)
+  status       UserStatus @default(ACTIVE)
+  lastLoginAt  DateTime?
+  createdAt    DateTime   @default(now())
+
+  sales        Sale[]
+  shifts       Shift[]
+  cashMovements CashMovement[]
+
+  @@unique([businessId, email])
+}
+
+model Terminal {
+  id         String   @id @default(cuid())
+  business   Business @relation(fields: [businessId], references: [id])
+  businessId String
+  name       String
+  identifier String   @unique // generated code the browser session binds to
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  sales      Sale[]
+  shifts     Shift[]
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  business    Business @relation(fields: [businessId], references: [id])
+  businessId  String
+  name        String
+  sku         String?
+  barcode     String?
+  category    String?
+  unit        String   @default("each")
+  costPrice   Decimal  @db.Decimal(12, 2) @default(0)
+  sellPrice   Decimal  @db.Decimal(12, 2)
+  taxRate     Decimal  @db.Decimal(5, 2) @default(0)
+  quantity    Decimal  @db.Decimal(12, 2) @default(0) // current stock on hand
+  reorderLevel Decimal @db.Decimal(12, 2) @default(0)
+  imageUrl    String?  @db.Text // base64 data URL — small product photos stored directly, no file storage service needed
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  saleItems     SaleItem[]
+  purchaseItems PurchaseItem[]
+  movements     StockMovement[]
+
+  @@index([businessId])
+  @@unique([businessId, sku])
+}
+
+// A curated list of product categories per business — kept separate from
+// Product.category (a plain string) so existing products are never touched
+// just by managing this list. Renaming here also relabels matching products
+// (see the /categories PUT route); deleting only removes it from the list.
+model Category {
+  id         String   @id @default(cuid())
+  business   Business @relation(fields: [businessId], references: [id])
+  businessId String
+  name       String
+  createdAt  DateTime @default(now())
+
+  @@unique([businessId, name])
+  @@index([businessId])
+}
+
+enum StockMovementType {
+  SALE
+  PURCHASE
+  ADJUSTMENT
+  RETURN
+  OPENING
+}
+
+model StockMovement {
+  id         String            @id @default(cuid())
+  business   Business          @relation(fields: [businessId], references: [id])
+  businessId String
+  product    Product           @relation(fields: [productId], references: [id])
+  productId  String
+  type       StockMovementType
+  quantity   Decimal           @db.Decimal(12, 2) // positive = in, negative = out
+  reason     String?
+  reference  String?
+  createdBy  String?
+  createdAt  DateTime          @default(now())
+
+  @@index([businessId, productId])
+}
+
+model Customer {
+  id             String    @id @default(cuid())
+  business       Business  @relation(fields: [businessId], references: [id])
+  businessId     String
+  name           String
+  idNumber       String?
+  phone          String?
+  email          String?
+  address        String?
+  dateOfBirth    DateTime?
+  nextOfKinName  String?
+  nextOfKinPhone String?
+  notes          String?
+  balance        Decimal   @db.Decimal(12, 2) @default(0)
+  createdAt      DateTime  @default(now())
+
+  sales      Sale[]
+  invoices   Invoice[]
+  quotations Quotation[]
+
+  @@index([businessId])
+}
+
+model Supplier {
+  id         String     @id @default(cuid())
+  business   Business   @relation(fields: [businessId], references: [id])
+  businessId String
+  name       String
+  phone      String?
+  email      String?
+  address    String?
+  balance    Decimal    @db.Decimal(12, 2) @default(0)
+  createdAt  DateTime   @default(now())
+  purchases  Purchase[]
+
+  @@index([businessId])
+}
+
+enum SaleStatus {
+  COMPLETED
+  VOIDED
+  REFUNDED
+  HELD
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  MOBILE_MONEY
+  ORANGE_MONEY
+  MYZAKA
+  SMEGA
+  BANK_TRANSFER
+  ACCOUNT
+  MIXED
+}
+
+model Sale {
+  id           String        @id @default(cuid())
+  business     Business      @relation(fields: [businessId], references: [id])
+  businessId   String
+  saleNumber   String
+  terminal     Terminal?     @relation(fields: [terminalId], references: [id])
+  terminalId   String?
+  cashier      User          @relation(fields: [cashierId], references: [id])
+  cashierId    String
+  customer     Customer?     @relation(fields: [customerId], references: [id])
+  customerId   String?
+  shift        Shift?        @relation(fields: [shiftId], references: [id])
+  shiftId      String?
+  items        SaleItem[]
+  laybuyPayments LaybuyPayment[]
+  subtotal     Decimal       @db.Decimal(12, 2)
+  taxTotal     Decimal       @db.Decimal(12, 2) @default(0)
+  discountTotal Decimal      @db.Decimal(12, 2) @default(0)
+  total        Decimal       @db.Decimal(12, 2)
+  amountPaid   Decimal       @db.Decimal(12, 2) @default(0)
+  changeDue    Decimal       @db.Decimal(12, 2) @default(0)
+  paymentMethod PaymentMethod @default(CASH)
+  status       SaleStatus    @default(COMPLETED)
+  // A client-generated id sent with the checkout request, used to make
+  // POST /sales idempotent — a sale rung up while offline (or retried after
+  // a dropped connection) can be safely replayed without ever creating a
+  // duplicate. Left null for older sales created before this existed.
+  clientRef    String?
+  createdAt    DateTime      @default(now())
+
+  @@index([businessId, createdAt])
+  @@unique([businessId, saleNumber])
+  @@unique([businessId, clientRef])
+}
+
+model SaleItem {
+  id         String   @id @default(cuid())
+  sale       Sale     @relation(fields: [saleId], references: [id])
+  saleId     String
+  product    Product  @relation(fields: [productId], references: [id])
+  productId  String
+  quantity   Decimal  @db.Decimal(12, 2)
+  unitPrice  Decimal  @db.Decimal(12, 2)
+  discount   Decimal  @db.Decimal(12, 2) @default(0)
+  taxAmount  Decimal  @db.Decimal(12, 2) @default(0)
+  total      Decimal  @db.Decimal(12, 2)
+}
+
+// Records each installment payment made toward an open laybuy (a Sale with
+// status HELD — deposit taken, stock reserved, item collected once paid
+// off). The Sale's own amountPaid/changeDue stay the running total so
+// receipts and the Laybuys list never need to sum anything themselves —
+// this table exists purely as the payment history / audit trail.
+model LaybuyPayment {
+  id            String        @id @default(cuid())
+  business      Business      @relation(fields: [businessId], references: [id])
+  businessId    String
+  sale          Sale          @relation(fields: [saleId], references: [id])
+  saleId        String
+  amount        Decimal       @db.Decimal(12, 2)
+  paymentMethod PaymentMethod @default(CASH)
+  createdBy     String?
+  createdAt     DateTime      @default(now())
+
+  @@index([businessId, saleId])
+}
+
+enum PurchaseStatus {
+  DRAFT
+  ORDERED
+  RECEIVED
+  CANCELLED
+}
+
+model Purchase {
+  id             String         @id @default(cuid())
+  business       Business       @relation(fields: [businessId], references: [id])
+  businessId     String
+  purchaseNumber String
+  supplier       Supplier       @relation(fields: [supplierId], references: [id])
+  supplierId     String
+  items          PurchaseItem[]
+  total          Decimal        @db.Decimal(12, 2)
+  status         PurchaseStatus @default(RECEIVED)
+  createdAt      DateTime       @default(now())
+
+  @@unique([businessId, purchaseNumber])
+}
+
+model PurchaseItem {
+  id         String   @id @default(cuid())
+  purchase   Purchase @relation(fields: [purchaseId], references: [id])
+  purchaseId String
+  product    Product  @relation(fields: [productId], references: [id])
+  productId  String
+  quantity   Decimal  @db.Decimal(12, 2)
+  unitCost   Decimal  @db.Decimal(12, 2)
+  total      Decimal  @db.Decimal(12, 2)
+}
+
+model Expense {
+  id          String   @id @default(cuid())
+  business    Business @relation(fields: [businessId], references: [id])
+  businessId  String
+  category    String
+  description String?
+  amount      Decimal  @db.Decimal(12, 2)
+  date        DateTime @default(now())
+  createdBy   String?
+  createdAt   DateTime @default(now())
+
+  @@index([businessId, date])
+}
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PARTIAL
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+model Invoice {
+  id            String        @id @default(cuid())
+  business      Business      @relation(fields: [businessId], references: [id])
+  businessId    String
+  invoiceNumber String
+  customer      Customer      @relation(fields: [customerId], references: [id])
+  customerId    String
+  items         Json // [{description, quantity, unitPrice, total}]
+  subtotal      Decimal       @db.Decimal(12, 2)
+  taxTotal      Decimal       @db.Decimal(12, 2) @default(0)
+  total         Decimal       @db.Decimal(12, 2)
+  amountPaid    Decimal       @db.Decimal(12, 2) @default(0)
+  dueDate       DateTime?
+  status        InvoiceStatus @default(DRAFT)
+  createdAt     DateTime      @default(now())
+
+  @@unique([businessId, invoiceNumber])
+}
+
+enum QuotationStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  DECLINED
+  EXPIRED
+  CONVERTED
+}
+
+model Quotation {
+  id          String          @id @default(cuid())
+  business    Business        @relation(fields: [businessId], references: [id])
+  businessId  String
+  quoteNumber String
+  customer    Customer?       @relation(fields: [customerId], references: [id])
+  customerId  String?
+  items       Json
+  subtotal    Decimal         @db.Decimal(12, 2)
+  taxTotal    Decimal         @db.Decimal(12, 2) @default(0)
+  total       Decimal         @db.Decimal(12, 2)
+  validUntil  DateTime?
+  status      QuotationStatus @default(DRAFT)
+  createdAt   DateTime        @default(now())
+
+  @@unique([businessId, quoteNumber])
+}
+
+enum ShiftStatus {
+  OPEN
+  CLOSED
+}
+
+model Shift {
+  id              String      @id @default(cuid())
+  business        Business    @relation(fields: [businessId], references: [id])
+  businessId      String
+  terminal        Terminal?   @relation(fields: [terminalId], references: [id])
+  terminalId      String?
+  cashier         User        @relation(fields: [cashierId], references: [id])
+  cashierId       String
+  openingBalance  Decimal     @db.Decimal(12, 2) @default(0)
+  closingBalance  Decimal?    @db.Decimal(12, 2)
+  expectedBalance Decimal?    @db.Decimal(12, 2)
+  status          ShiftStatus @default(OPEN)
+  openedAt        DateTime    @default(now())
+  closedAt        DateTime?
+  sales           Sale[]
+  cashMovements   CashMovement[]
+
+  @@index([businessId, status])
+}
+
+enum CashMovementType {
+  CASH_IN
+  CASH_OUT
+}
+
+model CashMovement {
+  id         String           @id @default(cuid())
+  business   Business         @relation(fields: [businessId], references: [id])
+  businessId String
+  shift      Shift            @relation(fields: [shiftId], references: [id])
+  shiftId    String
+  type       CashMovementType
+  amount     Decimal          @db.Decimal(12, 2)
+  reason     String?
+  createdBy  User             @relation(fields: [createdById], references: [id])
+  createdById String
+  createdAt  DateTime         @default(now())
+}

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { money } from "../lib/format";
@@ -46,9 +47,9 @@ export function DashboardPage() {
       <div className="card" style={{ marginTop: 16 }}>
         <h3 style={{ marginTop: 0 }}>Quick actions</h3>
         <div className="gap-8">
-          <a className="btn btn-primary" href="/pos">Open POS</a>
-          <a className="btn btn-secondary" href="/products">Manage Products</a>
-          <a className="btn btn-secondary" href="/reports">View Reports</a>
+          <Link className="btn btn-primary" to="/pos">Open POS</Link>
+          <Link className="btn btn-secondary" to="/products">Manage Products</Link>
+          <Link className="btn btn-secondary" to="/reports">View Reports</Link>
         </div>
       </div>
     </div>

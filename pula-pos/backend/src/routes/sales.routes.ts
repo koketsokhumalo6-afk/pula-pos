@@ -34,7 +34,12 @@ salesRouter.get(
   asyncHandler(async (req, res) => {
     const sale = await prisma.sale.findFirst({
       where: { id: req.params.id, businessId: req.auth!.businessId },
-      include: { items: { include: { product: true } }, customer: true, cashier: { select: { name: true } } },
+      include: {
+        items: { include: { product: true } },
+        customer: true,
+        cashier: { select: { name: true } },
+        laybuyPayments: { orderBy: { createdAt: "asc" } },
+      },
     });
     if (!sale) throw notFound();
     res.json(sale);
@@ -57,6 +62,10 @@ const createSaleSchema = z.object({
   paymentMethod: z
     .enum(["CASH", "CARD", "MOBILE_MONEY", "ORANGE_MONEY", "MYZAKA", "SMEGA", "BANK_TRANSFER", "ACCOUNT", "MIXED"])
     .default("CASH"),
+  // A laybuy takes a deposit and reserves the stock now, but the customer
+  // only collects — and the sale only counts as COMPLETED — once it's paid
+  // off (see POST /:id/laybuy-payment and POST /:id/complete-laybuy).
+  isLaybuy: z.boolean().optional().default(false),
 });
 
 /**
@@ -64,6 +73,9 @@ const createSaleSchema = z.object({
  * trusts client-sent totals), decrements inventory, and records the
  * transaction — all in one DB transaction so a partial sale can never be
  * left behind. Blocked entirely if the business's license is not active.
+ * A laybuy is created the same way (stock is reserved immediately) but
+ * lands as status HELD instead of COMPLETED, with amountPaid recording just
+ * the deposit.
  */
 salesRouter.post(
   "/",
@@ -71,6 +83,10 @@ salesRouter.post(
   asyncHandler(async (req, res) => {
     const data = createSaleSchema.parse(req.body);
     const businessId = req.auth!.businessId;
+
+    if (data.isLaybuy && !data.customerId) {
+      throw badRequest("Select a customer to start a laybuy.");
+    }
 
     const productIds = data.items.map((i) => i.productId);
     const products = await prisma.product.findMany({ where: { id: { in: productIds }, businessId } });
@@ -131,11 +147,15 @@ salesRouter.post(
           amountPaid: data.amountPaid,
           changeDue,
           paymentMethod: data.paymentMethod,
+          status: data.isLaybuy ? "HELD" : "COMPLETED",
           items: { create: lineData },
         },
         include: { items: true },
       });
 
+      // Stock is reserved the moment a laybuy starts, same as a regular
+      // sale — otherwise the item could get sold to someone else while this
+      // customer is still paying it off.
       for (const item of data.items) {
         await tx.product.update({ where: { id: item.productId }, data: { quantity: { decrement: item.quantity } } });
         await tx.stockMovement.create({
@@ -150,7 +170,10 @@ salesRouter.post(
         });
       }
 
-      if (data.customerId && data.paymentMethod === "ACCOUNT") {
+      // A laybuy deposit isn't a credit-account charge — the customer
+      // hasn't taken the goods yet, so it shouldn't add to their ACCOUNT
+      // balance the way a real "buy now, pay later" sale does.
+      if (data.customerId && data.paymentMethod === "ACCOUNT" && !data.isLaybuy) {
         await tx.customer.update({ where: { id: data.customerId }, data: { balance: { increment: total } } });
       }
 
@@ -161,6 +184,81 @@ salesRouter.post(
   })
 );
 
+const laybuyPaymentSchema = z.object({
+  amount: z.number().positive(),
+  paymentMethod: z
+    .enum(["CASH", "CARD", "MOBILE_MONEY", "ORANGE_MONEY", "MYZAKA", "SMEGA", "BANK_TRANSFER", "ACCOUNT", "MIXED"])
+    .default("CASH"),
+});
+
+/**
+ * Records another installment payment toward an open laybuy. Open to any
+ * signed-in role — recording money coming in doesn't remove value the way
+ * voiding does, so it doesn't need the manager-approval gate. Doesn't touch
+ * stock (already reserved when the laybuy started) or auto-complete the
+ * sale even once fully paid — handing the goods over is a separate,
+ * explicit step (see POST /:id/complete-laybuy) since paying it off and
+ * physically collecting it don't always happen at the same moment.
+ */
+salesRouter.post(
+  "/:id/laybuy-payment",
+  requireActiveLicense(),
+  asyncHandler(async (req, res) => {
+    const data = laybuyPaymentSchema.parse(req.body);
+    const businessId = req.auth!.businessId;
+
+    const sale = await prisma.sale.findFirst({ where: { id: req.params.id, businessId } });
+    if (!sale) throw notFound();
+    if (sale.status !== "HELD") throw badRequest("Only an open laybuy can take a payment");
+
+    const newAmountPaid = Number(sale.amountPaid) + data.amount;
+    const changeDue = Math.max(0, newAmountPaid - Number(sale.total));
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const updatedSale = await tx.sale.update({
+        where: { id: sale.id },
+        data: { amountPaid: newAmountPaid, changeDue },
+      });
+      await tx.laybuyPayment.create({
+        data: {
+          businessId,
+          saleId: sale.id,
+          amount: data.amount,
+          paymentMethod: data.paymentMethod,
+          createdBy: req.auth!.sub,
+        },
+      });
+      return updatedSale;
+    });
+
+    res.json(updated);
+  })
+);
+
+/**
+ * Marks a fully-paid laybuy COMPLETED — the moment the goods are actually
+ * handed over. Stock was already decremented when the laybuy started, so
+ * this is purely a status change. Refuses if there's still a balance owing.
+ */
+salesRouter.post(
+  "/:id/complete-laybuy",
+  requireActiveLicense(),
+  asyncHandler(async (req, res) => {
+    const businessId = req.auth!.businessId;
+    const sale = await prisma.sale.findFirst({ where: { id: req.params.id, businessId } });
+    if (!sale) throw notFound();
+    if (sale.status !== "HELD") throw badRequest("This sale isn't an open laybuy");
+
+    const remaining = Number(sale.total) - Number(sale.amountPaid);
+    if (remaining > 0) {
+      throw badRequest(`Laybuy isn't fully paid yet — balance remaining: ${remaining.toFixed(2)}`);
+    }
+
+    const updated = await prisma.sale.update({ where: { id: sale.id }, data: { status: "COMPLETED" } });
+    res.json(updated);
+  })
+);
+
 const voidSchema = z.object({
   reason: z.string().min(1),
   approverEmail: z.string().email().optional(),
@@ -168,13 +266,13 @@ const voidSchema = z.object({
 });
 
 /**
- * Voids a sale and restocks the items. Owner/admin/manager can void
- * directly. A cashier can also trigger this — from the POS screen right
- * after a sale, so they never need to hand over the terminal — but only by
- * supplying a manager/admin/owner's own email + password, verified right
- * here (the "manager override" pattern most POS systems use). Without a
- * valid approval, a cashier who could void their own sales could ring one
- * up, pocket the cash, then void it to erase the record.
+ * Voids a sale — or cancels an open laybuy — and restocks the items either
+ * way. Owner/admin/manager can do this directly. A cashier can also trigger
+ * it — from the POS screen right after a sale, or from the Laybuys tab —
+ * but only by supplying a manager/admin/owner's own email + password,
+ * verified right here (the "manager override" pattern most POS systems
+ * use). Without a valid approval, a cashier who could void their own sales
+ * could ring one up, pocket the cash, then void it to erase the record.
  */
 salesRouter.post(
   "/:id/void",
@@ -197,7 +295,9 @@ salesRouter.post(
 
     const sale = await prisma.sale.findFirst({ where: { id: req.params.id, businessId }, include: { items: true } });
     if (!sale) throw notFound();
-    if (sale.status !== "COMPLETED") throw badRequest("Only completed sales can be voided");
+    if (sale.status !== "COMPLETED" && sale.status !== "HELD") {
+      throw badRequest("Only completed sales or open laybuys can be voided");
+    }
 
     await prisma.$transaction(async (tx) => {
       await tx.sale.update({ where: { id: sale.id }, data: { status: "VOIDED" } });
@@ -210,7 +310,7 @@ salesRouter.post(
             type: "RETURN",
             quantity: Number(item.quantity),
             reference: sale.saleNumber,
-            reason: "Sale voided",
+            reason: sale.status === "HELD" ? "Laybuy cancelled" : "Sale voided",
             createdBy: req.auth!.sub,
           },
         });

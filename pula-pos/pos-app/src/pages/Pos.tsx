@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiRequestError } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
-import { money } from "../lib/format";
+import { money, dateTime } from "../lib/format";
 import { Receipt } from "../components/Receipt";
 import type { ReceiptData } from "../lib/receipt";
 
@@ -44,6 +44,17 @@ const PAYMENT_METHODS = [
   "ACCOUNT",
 ] as const;
 
+// A recent completed sale, as returned by GET /sales — just enough to list
+// and pick from when voiding something other than the sale just rung up.
+interface RecentSale {
+  id: string;
+  saleNumber: string;
+  total: string;
+  status: string;
+  createdAt: string;
+  cashier: { name: string };
+}
+
 export function PosPage() {
   const { business, user } = useAuth();
   const [receiptSale, setReceiptSale] = useState<ReceiptData | null>(null);
@@ -59,6 +70,21 @@ export function PosPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  // "Void a Sale" — a standing option on this screen (not just the receipt
+  // shown right after checkout) so a sale from earlier in the shift can be
+  // voided without leaving the register. Same manager-override rule applies:
+  // a cashier must supply a manager/admin/owner's own password to confirm.
+  const needsApproval = user?.role === "CASHIER";
+  const [showVoidPicker, setShowVoidPicker] = useState(false);
+  const [recentSales, setRecentSales] = useState<RecentSale[]>([]);
+  const [loadingRecent, setLoadingRecent] = useState(false);
+  const [voidingSale, setVoidingSale] = useState<RecentSale | null>(null);
+  const [voidReason, setVoidReason] = useState("");
+  const [approverEmail, setApproverEmail] = useState("");
+  const [approverPassword, setApproverPassword] = useState("");
+  const [voidError, setVoidError] = useState<string | null>(null);
+  const [voidSubmitting, setVoidSubmitting] = useState(false);
 
   useEffect(() => {
     loadProducts();
@@ -162,19 +188,75 @@ export function PosPage() {
     }
   }
 
+  function openVoidPicker() {
+    setShowVoidPicker(true);
+    setVoidingSale(null);
+    setLoadingRecent(true);
+    api
+      .get<RecentSale[]>("/sales")
+      .then((all) => setRecentSales(all.filter((s) => s.status === "COMPLETED").slice(0, 15)))
+      .catch(() => setRecentSales([]))
+      .finally(() => setLoadingRecent(false));
+  }
+
+  function closeVoidPicker() {
+    setShowVoidPicker(false);
+    setVoidingSale(null);
+  }
+
+  function selectSaleToVoid(s: RecentSale) {
+    setVoidingSale(s);
+    setVoidReason("");
+    setApproverEmail("");
+    setApproverPassword("");
+    setVoidError(null);
+  }
+
+  async function submitVoidFromPicker() {
+    if (!voidingSale) return;
+    if (!voidReason.trim()) {
+      setVoidError("A reason is required");
+      return;
+    }
+    if (needsApproval && (!approverEmail.trim() || !approverPassword)) {
+      setVoidError("A manager, admin, or owner needs to approve this — enter their email and password.");
+      return;
+    }
+    setVoidError(null);
+    setVoidSubmitting(true);
+    try {
+      await api.post(`/sales/${voidingSale.id}/void`, {
+        reason: voidReason.trim(),
+        ...(needsApproval ? { approverEmail: approverEmail.trim(), approverPassword } : {}),
+      });
+      setShowVoidPicker(false);
+      setVoidingSale(null);
+      loadProducts();
+    } catch (err) {
+      setVoidError(err instanceof ApiRequestError ? err.message : "Failed to void sale");
+    } finally {
+      setVoidSubmitting(false);
+    }
+  }
+
   return (
     <div>
       <div className="flex-between" style={{ marginBottom: 14 }}>
         <h2 style={{ margin: 0 }}>Point of Sale</h2>
-        <input
-          placeholder="Search product name, SKU or barcode…"
-          style={{ width: 320 }}
-          value={search}
-          onChange={(e) => {
-            setSearch(e.target.value);
-            loadProducts(e.target.value);
-          }}
-        />
+        <div className="gap-8" style={{ alignItems: "center" }}>
+          <button className="btn btn-danger btn-sm" onClick={openVoidPicker}>
+            Void a Sale
+          </button>
+          <input
+            placeholder="Search product name, SKU or barcode…"
+            style={{ width: 320 }}
+            value={search}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              loadProducts(e.target.value);
+            }}
+          />
+        </div>
       </div>
 
       <div className="pos-layout">
@@ -293,6 +375,82 @@ export function PosPage() {
             loadProducts();
           }}
         />
+      )}
+
+      {showVoidPicker && (
+        <div className="modal-overlay" onClick={closeVoidPicker}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            {!voidingSale ? (
+              <>
+                <h3 style={{ marginTop: 0 }}>Void a Sale</h3>
+                <p className="muted" style={{ marginTop: -6 }}>
+                  Pick a recent sale to void. This restocks the items and marks the sale voided — it can't be undone.
+                </p>
+                {loadingRecent && <p className="muted">Loading…</p>}
+                {!loadingRecent && !recentSales.length && <p className="muted">No completed sales to void.</p>}
+                <div style={{ maxHeight: 320, overflowY: "auto" }}>
+                  {recentSales.map((s) => (
+                    <div
+                      key={s.id}
+                      className="flex-between"
+                      style={{ padding: "8px 0", borderBottom: "1px solid var(--border)" }}
+                    >
+                      <div>
+                        <div>{s.saleNumber}</div>
+                        <div className="muted" style={{ fontSize: 12 }}>
+                          {s.cashier?.name} · {dateTime(s.createdAt)} · {money(s.total, business?.currency)}
+                        </div>
+                      </div>
+                      <button className="btn btn-danger btn-sm" onClick={() => selectSaleToVoid(s)}>
+                        Void
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <div className="gap-8" style={{ marginTop: 12 }}>
+                  <button className="btn btn-secondary" onClick={closeVoidPicker}>Close</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h3 style={{ marginTop: 0 }}>Void sale {voidingSale.saleNumber}</h3>
+                <p className="muted" style={{ marginTop: -6 }}>
+                  This restocks the items and marks the sale voided. It can't be undone.
+                </p>
+                <div className="field">
+                  <label>Reason *</label>
+                  <input
+                    value={voidReason}
+                    onChange={(e) => setVoidReason(e.target.value)}
+                    placeholder="e.g. entered by mistake, customer walked away"
+                  />
+                </div>
+                {needsApproval && (
+                  <>
+                    <p className="muted" style={{ marginTop: -4, marginBottom: 10 }}>
+                      A manager, admin, or owner needs to approve this — enter their own login.
+                    </p>
+                    <div className="field">
+                      <label>Manager/Admin/Owner email *</label>
+                      <input value={approverEmail} onChange={(e) => setApproverEmail(e.target.value)} placeholder="their email" />
+                    </div>
+                    <div className="field">
+                      <label>Their password *</label>
+                      <input type="password" value={approverPassword} onChange={(e) => setApproverPassword(e.target.value)} />
+                    </div>
+                  </>
+                )}
+                {voidError && <div className="error-text">{voidError}</div>}
+                <div className="gap-8" style={{ marginTop: 10 }}>
+                  <button className="btn btn-danger" onClick={submitVoidFromPicker} disabled={voidSubmitting}>
+                    {voidSubmitting ? "Voiding…" : "Confirm Void"}
+                  </button>
+                  <button className="btn btn-secondary" onClick={() => setVoidingSale(null)}>Back</button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );

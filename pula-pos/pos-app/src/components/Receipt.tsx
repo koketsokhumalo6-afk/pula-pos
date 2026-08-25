@@ -146,6 +146,9 @@ export function Receipt({
           {sale.taxTotal > 0 && <div className="receipt-row"><span>Tax</span><span>{money(sale.taxTotal, currency)}</span></div>}
           <div className="receipt-row receipt-bold"><span>TOTAL</span><span>{money(sale.total, currency)}</span></div>
           <div className="receipt-row"><span>Paid ({sale.paymentMethod.replace("_", " ")})</span><span>{money(sale.amountPaid, currency)}</span></div>
+          {sale.total > sale.amountPaid && (
+            <div className="receipt-row receipt-bold"><span>Balance Owing</span><span>{money(sale.total - sale.amountPaid, currency)}</span></div>
+          )}
           {sale.changeDue > 0 && <div className="receipt-row"><span>Change</span><span>{money(sale.changeDue, currency)}</span></div>}
           <div className="receipt-divider" />
           <div className="receipt-center">Thank you for your business!</div>

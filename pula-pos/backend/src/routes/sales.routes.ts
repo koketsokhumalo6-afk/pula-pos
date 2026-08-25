@@ -1,329 +1,179 @@
-import { Router } from "express";
-import { z } from "zod";
-import bcrypt from "bcryptjs";
-import { prisma } from "../lib/prisma";
-import { asyncHandler } from "../utils/asyncHandler";
-import { requireBusinessAuth, hasPermission, requirePermission } from "../middleware/auth";
-import { requireActiveLicense } from "../middleware/license";
-import { badRequest, notFound, forbidden } from "../utils/errors";
+import { useEffect, useState } from "react";
+import { api, ApiRequestError } from "./api";
 
-export const salesRouter = Router();
-salesRouter.use(requireBusinessAuth);
-
-salesRouter.get(
-  "/",
-  asyncHandler(async (req, res) => {
-    const { from, to } = req.query as { from?: string; to?: string };
-    const sales = await prisma.sale.findMany({
-      where: {
-        businessId: req.auth!.businessId,
-        ...(from || to
-          ? { createdAt: { gte: from ? new Date(from) : undefined, lte: to ? new Date(to) : undefined } }
-          : {}),
-      },
-      include: { items: true, customer: true, cashier: { select: { name: true } } },
-      orderBy: { createdAt: "desc" },
-      take: 500,
-    });
-    res.json(sales);
-  })
-);
-
-salesRouter.get(
-  "/:id",
-  asyncHandler(async (req, res) => {
-    const sale = await prisma.sale.findFirst({
-      where: { id: req.params.id, businessId: req.auth!.businessId },
-      include: {
-        items: { include: { product: true } },
-        customer: true,
-        cashier: { select: { name: true } },
-        laybuyPayments: { orderBy: { createdAt: "asc" } },
-      },
-    });
-    if (!sale) throw notFound();
-    res.json(sale);
-  })
-);
-
-const cartItem = z.object({
-  productId: z.string(),
-  quantity: z.number().positive(),
-  unitPrice: z.number().nonnegative(),
-  discount: z.number().nonnegative().default(0),
-});
-
-const createSaleSchema = z.object({
-  items: z.array(cartItem).min(1),
-  customerId: z.string().optional(),
-  terminalId: z.string().optional(),
-  shiftId: z.string().optional(),
-  amountPaid: z.number().nonnegative(),
-  paymentMethod: z
-    .enum(["CASH", "CARD", "MOBILE_MONEY", "ORANGE_MONEY", "MYZAKA", "SMEGA", "BANK_TRANSFER", "ACCOUNT", "MIXED"])
-    .default("CASH"),
-  // A laybuy takes a deposit and reserves the stock now, but the customer
-  // only collects — and the sale only counts as COMPLETED — once it's paid
-  // off (see POST /:id/laybuy-payment and POST /:id/complete-laybuy).
-  isLaybuy: z.boolean().optional().default(false),
-});
+/* ------------------------------ ids & status ------------------------------- */
 
 /**
- * Creates a POS sale: validates stock, computes totals server-side (never
- * trusts client-sent totals), decrements inventory, and records the
- * transaction — all in one DB transaction so a partial sale can never be
- * left behind. Blocked entirely if the business's license is not active.
- * A laybuy is created the same way (stock is reserved immediately) but
- * lands as status HELD instead of COMPLETED, with amountPaid recording just
- * the deposit.
+ * A locally-generated id used both as a temporary key for a queued offline
+ * sale and as the idempotency key (`clientRef`) sent with every checkout —
+ * so a sale that's retried after a partial failure (the response never made
+ * it back, but the sale was actually created) is never double-recorded.
  */
-salesRouter.post(
-  "/",
-  requireActiveLicense(),
-  asyncHandler(async (req, res) => {
-    const data = createSaleSchema.parse(req.body);
-    const businessId = req.auth!.businessId;
+export function generateId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
-    if (data.isLaybuy) {
-      if (!data.customerId) throw badRequest("Select a customer to start a laybuy.");
-      if (!(await hasPermission(req, "laybuys"))) {
-        throw forbidden("You don't have permission to start a laybuy.");
-      }
-    }
+/** Tracks the browser's online/offline state, updating on the standard
+ * `online`/`offline` window events. Not a perfect signal (a device can
+ * report "online" while genuinely unable to reach the server), which is why
+ * checkout() also treats a network-type fetch failure as offline regardless
+ * of what this reports. */
+export function useOnlineStatus(): boolean {
+  const [online, setOnline] = useState(() => (typeof navigator === "undefined" ? true : navigator.onLine));
 
-    const productIds = data.items.map((i) => i.productId);
-    const products = await prisma.product.findMany({ where: { id: { in: productIds }, businessId } });
-    const byId = new Map(products.map((p) => [p.id, p]));
+  useEffect(() => {
+    const goOnline = () => setOnline(true);
+    const goOffline = () => setOnline(false);
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    return () => {
+      window.removeEventListener("online", goOnline);
+      window.removeEventListener("offline", goOffline);
+    };
+  }, []);
 
-    let subtotal = 0;
-    let taxTotal = 0;
-    let discountTotal = 0;
-    const lineData: {
-      productId: string;
-      quantity: number;
-      unitPrice: number;
-      discount: number;
-      taxAmount: number;
-      total: number;
-    }[] = [];
+  return online;
+}
 
-    for (const item of data.items) {
-      const product = byId.get(item.productId);
-      if (!product) throw badRequest(`Unknown product: ${item.productId}`);
-      if (Number(product.quantity) < item.quantity) {
-        throw badRequest(`Insufficient stock for ${product.name} (have ${product.quantity}, need ${item.quantity})`);
-      }
-      const lineSubtotal = item.unitPrice * item.quantity - item.discount;
-      const lineTax = lineSubtotal * (Number(product.taxRate) / 100);
-      const lineTotal = lineSubtotal + lineTax;
-      subtotal += item.unitPrice * item.quantity;
-      discountTotal += item.discount;
-      taxTotal += lineTax;
-      lineData.push({
-        productId: item.productId,
-        quantity: item.quantity,
-        unitPrice: item.unitPrice,
-        discount: item.discount,
-        taxAmount: lineTax,
-        total: lineTotal,
-      });
-    }
+/* ------------------------------- local cache -------------------------------- */
+// Products/customers are cached per business, not globally — a shared
+// device that logs into a different business later never shows stale data
+// left over from the previous one.
 
-    const total = subtotal - discountTotal + taxTotal;
-    const changeDue = Math.max(0, data.amountPaid - total);
+function cacheKey(businessId: string, kind: string) {
+  return `pula_cache_${businessId}_${kind}`;
+}
 
-    const saleNumber = `S-${Date.now().toString(36).toUpperCase()}`;
+function readCache<T>(businessId: string, kind: string): T | null {
+  try {
+    const raw = localStorage.getItem(cacheKey(businessId, kind));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed?.data ?? null;
+  } catch {
+    return null;
+  }
+}
 
-    const sale = await prisma.$transaction(async (tx) => {
-      const created = await tx.sale.create({
-        data: {
-          businessId,
-          saleNumber,
-          cashierId: req.auth!.sub,
-          customerId: data.customerId,
-          terminalId: data.terminalId,
-          shiftId: data.shiftId,
-          subtotal,
-          taxTotal,
-          discountTotal,
-          total,
-          amountPaid: data.amountPaid,
-          changeDue,
-          paymentMethod: data.paymentMethod,
-          status: data.isLaybuy ? "HELD" : "COMPLETED",
-          items: { create: lineData },
-        },
-        include: { items: true },
-      });
+function writeCache<T>(businessId: string, kind: string, data: T) {
+  try {
+    localStorage.setItem(cacheKey(businessId, kind), JSON.stringify({ savedAt: new Date().toISOString(), data }));
+  } catch {
+    /* storage full/unavailable — caching is a nice-to-have, never fatal */
+  }
+}
 
-      // Stock is reserved the moment a laybuy starts, same as a regular
-      // sale — otherwise the item could get sold to someone else while this
-      // customer is still paying it off.
-      for (const item of data.items) {
-        await tx.product.update({ where: { id: item.productId }, data: { quantity: { decrement: item.quantity } } });
-        await tx.stockMovement.create({
-          data: {
-            businessId,
-            productId: item.productId,
-            type: "SALE",
-            quantity: -item.quantity,
-            reference: created.saleNumber,
-            createdBy: req.auth!.sub,
-          },
-        });
-      }
+export function loadProductsCache<T>(businessId: string): T[] | null {
+  return readCache<T[]>(businessId, "products");
+}
+export function saveProductsCache<T>(businessId: string, products: T[]) {
+  writeCache(businessId, "products", products);
+}
 
-      // A laybuy deposit isn't a credit-account charge — the customer
-      // hasn't taken the goods yet, so it shouldn't add to their ACCOUNT
-      // balance the way a real "buy now, pay later" sale does.
-      if (data.customerId && data.paymentMethod === "ACCOUNT" && !data.isLaybuy) {
-        await tx.customer.update({ where: { id: data.customerId }, data: { balance: { increment: total } } });
-      }
+export function loadCustomersCache<T>(businessId: string): T[] | null {
+  return readCache<T[]>(businessId, "customers");
+}
+export function saveCustomersCache<T>(businessId: string, customers: T[]) {
+  writeCache(businessId, "customers", customers);
+}
 
-      return created;
-    });
+/** Keeps a cached/in-memory product list's stock counts honest immediately
+ * after an offline sale is queued — there's no server round-trip to refresh
+ * from until that sale actually syncs, so without this the POS screen would
+ * keep showing pre-sale stock for the rest of the outage. */
+export function applyLocalStockDecrement<T extends { id: string; quantity: string }>(
+  products: T[],
+  items: { productId: string; quantity: number }[]
+): T[] {
+  const byId = new Map(items.map((i) => [i.productId, i.quantity]));
+  return products.map((p) => {
+    const qty = byId.get(p.id);
+    return qty === undefined ? p : { ...p, quantity: String(Math.max(0, Number(p.quantity) - qty)) };
+  });
+}
 
-    res.status(201).json(sale);
-  })
-);
+/** Same adjustment, applied straight to the persisted cache (not just
+ * in-memory state) so it survives a refresh while still offline. */
+export function decrementCachedStock(businessId: string, items: { productId: string; quantity: number }[]) {
+  const cached = loadProductsCache<{ id: string; quantity: string }>(businessId);
+  if (!cached) return;
+  saveProductsCache(businessId, applyLocalStockDecrement(cached, items));
+}
 
-const laybuyPaymentSchema = z.object({
-  amount: z.number().positive(),
-  paymentMethod: z
-    .enum(["CASH", "CARD", "MOBILE_MONEY", "ORANGE_MONEY", "MYZAKA", "SMEGA", "BANK_TRANSFER", "ACCOUNT", "MIXED"])
-    .default("CASH"),
-});
+/* --------------------------------- outbox ------------------------------------ */
+
+export interface QueuedSale {
+  clientRef: string;
+  queuedAt: string;
+  payload: Record<string, unknown>;
+  lastError?: string;
+}
+
+function queueKey(businessId: string) {
+  return `pula_offline_queue_${businessId}`;
+}
+
+export function getQueuedSales(businessId: string): QueuedSale[] {
+  try {
+    const raw = localStorage.getItem(queueKey(businessId));
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeQueue(businessId: string, queue: QueuedSale[]) {
+  try {
+    localStorage.setItem(queueKey(businessId), JSON.stringify(queue));
+  } catch {
+    /* if storage is full there's nothing more we can do locally */
+  }
+}
+
+/** Saves a checkout payload (already carrying its `clientRef`) into the
+ * local outbox so it can be replayed once the connection comes back. */
+export function enqueueSale(businessId: string, payload: Record<string, unknown> & { clientRef: string }) {
+  const queue = getQueuedSales(businessId);
+  queue.push({ clientRef: payload.clientRef, queuedAt: new Date().toISOString(), payload });
+  writeQueue(businessId, queue);
+}
+
+export function removeQueuedSale(businessId: string, clientRef: string) {
+  writeQueue(businessId, getQueuedSales(businessId).filter((q) => q.clientRef !== clientRef));
+}
+
+function updateQueuedSale(businessId: string, clientRef: string, patch: Partial<QueuedSale>) {
+  writeQueue(businessId, getQueuedSales(businessId).map((q) => (q.clientRef === clientRef ? { ...q, ...patch } : q)));
+}
 
 /**
- * Records another installment payment toward an open laybuy. Open to any
- * signed-in role — recording money coming in doesn't remove value the way
- * voiding does, so it doesn't need the manager-approval gate. Doesn't touch
- * stock (already reserved when the laybuy started) or auto-complete the
- * sale even once fully paid — handing the goods over is a separate,
- * explicit step (see POST /:id/complete-laybuy) since paying it off and
- * physically collecting it don't always happen at the same moment. Gated
- * by the "laybuys" permission, same as starting one.
+ * Replays every queued sale for this business, oldest first. A sale the
+ * server actually rejects (stock ran out before it synced, license lapsed,
+ * etc.) is left in the queue with its error recorded rather than silently
+ * dropped, so nothing is ever lost — it just needs someone to look at it. A
+ * plain network failure mid-run stops the loop immediately instead of
+ * burning through the rest of the queue while still offline.
  */
-salesRouter.post(
-  "/:id/laybuy-payment",
-  requireActiveLicense(),
-  requirePermission("laybuys"),
-  asyncHandler(async (req, res) => {
-    const data = laybuyPaymentSchema.parse(req.body);
-    const businessId = req.auth!.businessId;
-
-    const sale = await prisma.sale.findFirst({ where: { id: req.params.id, businessId } });
-    if (!sale) throw notFound();
-    if (sale.status !== "HELD") throw badRequest("Only an open laybuy can take a payment");
-
-    const newAmountPaid = Number(sale.amountPaid) + data.amount;
-    const changeDue = Math.max(0, newAmountPaid - Number(sale.total));
-
-    const updated = await prisma.$transaction(async (tx) => {
-      const updatedSale = await tx.sale.update({
-        where: { id: sale.id },
-        data: { amountPaid: newAmountPaid, changeDue },
-      });
-      await tx.laybuyPayment.create({
-        data: {
-          businessId,
-          saleId: sale.id,
-          amount: data.amount,
-          paymentMethod: data.paymentMethod,
-          createdBy: req.auth!.sub,
-        },
-      });
-      return updatedSale;
-    });
-
-    res.json(updated);
-  })
-);
-
-/**
- * Marks a fully-paid laybuy COMPLETED — the moment the goods are actually
- * handed over. Stock was already decremented when the laybuy started, so
- * this is purely a status change. Refuses if there's still a balance owing.
- * Gated by the "laybuys" permission, same as starting one.
- */
-salesRouter.post(
-  "/:id/complete-laybuy",
-  requireActiveLicense(),
-  requirePermission("laybuys"),
-  asyncHandler(async (req, res) => {
-    const businessId = req.auth!.businessId;
-    const sale = await prisma.sale.findFirst({ where: { id: req.params.id, businessId } });
-    if (!sale) throw notFound();
-    if (sale.status !== "HELD") throw badRequest("This sale isn't an open laybuy");
-
-    const remaining = Number(sale.total) - Number(sale.amountPaid);
-    if (remaining > 0) {
-      throw badRequest(`Laybuy isn't fully paid yet — balance remaining: ${remaining.toFixed(2)}`);
-    }
-
-    const updated = await prisma.sale.update({ where: { id: sale.id }, data: { status: "COMPLETED" } });
-    res.json(updated);
-  })
-);
-
-const voidSchema = z.object({
-  reason: z.string().min(1),
-  approverEmail: z.string().email().optional(),
-  approverPassword: z.string().min(1).optional(),
-});
-
-/**
- * Voids a sale — or cancels an open laybuy — and restocks the items either
- * way. Owner/admin/manager can do this directly. A cashier can also trigger
- * it — from the POS screen right after a sale, or from the Laybuys tab —
- * but only by supplying a manager/admin/owner's own email + password,
- * verified right here (the "manager override" pattern most POS systems
- * use). Without a valid approval, a cashier who could void their own sales
- * could ring one up, pocket the cash, then void it to erase the record.
- */
-salesRouter.post(
-  "/:id/void",
-  requireActiveLicense(),
-  asyncHandler(async (req, res) => {
-    const data = voidSchema.parse(req.body);
-    const businessId = req.auth!.businessId;
-
-    if (req.auth!.role === "CASHIER") {
-      if (!data.approverEmail || !data.approverPassword) {
-        throw forbidden("A manager, admin, or owner must approve this void.");
+export async function syncQueuedSales(businessId: string): Promise<{ synced: number; failed: number }> {
+  const queue = getQueuedSales(businessId);
+  let synced = 0;
+  let failed = 0;
+  for (const item of queue) {
+    try {
+      await api.post("/sales", item.payload);
+      removeQueuedSale(businessId, item.clientRef);
+      synced++;
+    } catch (err) {
+      if (err instanceof ApiRequestError) {
+        updateQueuedSale(businessId, item.clientRef, { lastError: err.message });
+        failed++;
+      } else {
+        break; // network failure — likely offline again, stop and retry later
       }
-      const approver = await prisma.user.findUnique({
-        where: { businessId_email: { businessId, email: data.approverEmail } },
-      });
-      const validRole = !!approver && approver.status === "ACTIVE" && ["OWNER", "ADMIN", "MANAGER"].includes(approver.role);
-      const validPassword = approver ? await bcrypt.compare(data.approverPassword, approver.passwordHash) : false;
-      if (!validRole || !validPassword) throw forbidden("That manager login couldn't be verified.");
     }
-
-    const sale = await prisma.sale.findFirst({ where: { id: req.params.id, businessId }, include: { items: true } });
-    if (!sale) throw notFound();
-    if (sale.status !== "COMPLETED" && sale.status !== "HELD") {
-      throw badRequest("Only completed sales or open laybuys can be voided");
-    }
-
-    await prisma.$transaction(async (tx) => {
-      await tx.sale.update({ where: { id: sale.id }, data: { status: "VOIDED" } });
-      for (const item of sale.items) {
-        await tx.product.update({ where: { id: item.productId }, data: { quantity: { increment: Number(item.quantity) } } });
-        await tx.stockMovement.create({
-          data: {
-            businessId,
-            productId: item.productId,
-            type: "RETURN",
-            quantity: Number(item.quantity),
-            reference: sale.saleNumber,
-            reason: sale.status === "HELD" ? "Laybuy cancelled" : "Sale voided",
-            createdBy: req.auth!.sub,
-          },
-        });
-      }
-    });
-
-    res.json({ ok: true });
-  })
-);
+  }
+  return { synced, failed };
+}

@@ -22,6 +22,7 @@ import { terminalsRouter } from "./routes/terminals.routes";
 import { reportsRouter } from "./routes/reports.routes";
 import { licenseStatusRouter } from "./routes/license.routes";
 import { businessRouter } from "./routes/business.routes";
+import { dataToolsRouter } from "./routes/dataTools.routes";
 
 const app = express();
 
@@ -59,6 +60,7 @@ app.use("/api/shifts", shiftsRouter);
 app.use("/api/terminals", terminalsRouter);
 app.use("/api/reports", reportsRouter);
 app.use("/api/business", businessRouter);
+app.use("/api/data-tools", dataToolsRouter);
 
 app.use(errorHandler);
 

@@ -120,6 +120,13 @@ export function Receipt({
           </div>
         </div>
 
+        {sale.pending && (
+          <div className="banner banner-warning" style={{ marginBottom: 12, borderRadius: 6 }}>
+            Saved offline — this sale hasn't synced to the server yet. Its sale number will update automatically once
+            it does.
+          </div>
+        )}
+
         <div className={`receipt-printable receipt-${width}`}>
           {business?.logoUrl && <img src={business.logoUrl} alt="" className="receipt-logo" />}
           {displayName && <div className="receipt-center receipt-bold">{displayName}</div>}
@@ -159,7 +166,7 @@ export function Receipt({
           <button className="btn btn-secondary" onClick={downloadPdf} disabled={generating}>
             {generating ? "Preparing…" : "Download PDF"}
           </button>
-          {allowVoid && !voiding && (
+          {allowVoid && !voiding && !sale.pending && (
             <button className="btn btn-danger" onClick={openVoid}>Void Sale</button>
           )}
           <button className="btn btn-secondary" onClick={onClose}>Close</button>

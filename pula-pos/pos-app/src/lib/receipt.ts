@@ -27,6 +27,9 @@ export interface ReceiptData {
   total: number;
   amountPaid: number;
   changeDue: number;
+  // Set when this sale was rung up offline and hasn't synced to the server
+  // yet — the sale number shown is a placeholder until it does.
+  pending?: boolean;
 }
 
 export interface ReceiptBusiness {
@@ -90,6 +93,9 @@ export async function buildReceiptPdf(sale: ReceiptData, business: ReceiptBusine
   commands.push({ kind: "text", text: dateTime(sale.createdAt), align: "left" });
   commands.push({ kind: "text", text: `Cashier: ${sale.cashierName}`, align: "left" });
   commands.push({ kind: "text", text: `Customer: ${sale.customerName || "Walk-in"}`, align: "left" });
+  if (sale.pending) {
+    commands.push({ kind: "text", text: "PENDING SYNC — offline sale", align: "center", bold: true });
+  }
   commands.push({ kind: "divider" });
 
   for (const item of sale.items) {

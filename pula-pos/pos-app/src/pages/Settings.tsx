@@ -5,6 +5,7 @@ import { useAuth } from "../context/AuthContext";
 import { resizeImageToDataUrl } from "../lib/image";
 import { downloadFile } from "../lib/download";
 import { parseCsv, csvRowsToObjects } from "../lib/csv";
+import { PERMISSION_SECTIONS, SECTION_LABELS, type PermissionMap, type PermissionRole } from "../lib/permissions";
 
 /* ------------------------------- Icons ---------------------------------- */
 /* Small hand-drawn line icons (no external icon library / dependency) so
@@ -64,13 +65,23 @@ function IconData() {
   );
 }
 
-type Section = "business" | "users" | "terminals" | "data" | "security";
+function IconShield() {
+  return (
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 3l7 3v5.5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z" />
+      <path d="M9 12l2 2 4-4" />
+    </svg>
+  );
+}
+
+type Section = "business" | "users" | "terminals" | "data" | "permissions" | "security";
 
 const CARDS: { key: Section; label: string; blurb: string; icon: () => JSX.Element }[] = [
   { key: "business", label: "Business Profile", blurb: "Name, address, tax details", icon: IconBusiness },
   { key: "users", label: "Users & Roles", blurb: "Manage staff accounts", icon: IconUsers },
   { key: "terminals", label: "Terminals", blurb: "POS devices registered", icon: IconTerminal },
   { key: "data", label: "Data Tools", blurb: "Import, export, backup", icon: IconData },
+  { key: "permissions", label: "Permissions", blurb: "Which pages each role can open", icon: IconShield },
   { key: "security", label: "Password & Security", blurb: "Change your password", icon: IconLock },
 ];
 
@@ -112,6 +123,7 @@ export function SettingsPage() {
         {active === "users" && <UsersSection />}
         {active === "terminals" && <TerminalsSection />}
         {active === "data" && <DataToolsSection />}
+        {active === "permissions" && <PermissionsSection />}
         {active === "security" && <SecuritySection />}
       </div>
     </div>
@@ -571,6 +583,100 @@ function DataToolsSection() {
           <p className="muted">Only the business owner can download a full backup.</p>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ------------------------------ Permissions -------------------------------- */
+
+const PERMISSION_ROLES: PermissionRole[] = ["CASHIER", "MANAGER", "ADMIN"];
+
+function PermissionsSection() {
+  const { user } = useAuth();
+  const [matrix, setMatrix] = useState<Record<PermissionRole, PermissionMap> | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (user?.role !== "OWNER") return;
+    api.get<Record<PermissionRole, PermissionMap>>("/business/permissions").then(setMatrix).catch(() => {});
+  }, [user?.role]);
+
+  function toggle(role: PermissionRole, section: keyof PermissionMap) {
+    if (!matrix) return;
+    setMatrix({ ...matrix, [role]: { ...matrix[role], [section]: !matrix[role][section] } });
+  }
+
+  async function save() {
+    if (!matrix) return;
+    setError(null);
+    setSuccess(null);
+    setSaving(true);
+    try {
+      const updated = await api.patch<Record<PermissionRole, PermissionMap>>("/business/permissions", matrix);
+      setMatrix(updated);
+      setSuccess("Permissions updated.");
+    } catch (err) {
+      setError(err instanceof ApiRequestError ? err.message : "Failed to save permissions");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (user?.role !== "OWNER") {
+    return (
+      <div className="card" style={{ maxWidth: 620 }}>
+        <h3 style={{ marginTop: 0 }}>Permissions</h3>
+        <p className="muted">Only the business owner can manage which pages each role can access.</p>
+      </div>
+    );
+  }
+
+  if (!matrix) {
+    return (
+      <div className="card" style={{ maxWidth: 680 }}>
+        <p className="muted">Loading…</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="card" style={{ maxWidth: 680 }}>
+      <h3 style={{ marginTop: 0 }}>Permissions</h3>
+      <p className="muted" style={{ marginTop: -6, marginBottom: 14 }}>
+        Choose which pages each role can open. Owners always have full access, so they aren't shown here. Dashboard
+        and Point of Sale are always available to everyone signed in, so they aren't listed either.
+      </p>
+      <div style={{ overflowX: "auto" }}>
+        <table>
+          <thead>
+            <tr>
+              <th>Page</th>
+              {PERMISSION_ROLES.map((role) => (
+                <th key={role} style={{ textAlign: "center" }}>{role.charAt(0) + role.slice(1).toLowerCase()}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {PERMISSION_SECTIONS.filter((s) => s !== "dashboard").map((section) => (
+              <tr key={section}>
+                <td>{SECTION_LABELS[section]}</td>
+                {PERMISSION_ROLES.map((role) => (
+                  <td key={role} style={{ textAlign: "center" }}>
+                    <input type="checkbox" checked={matrix[role][section]} onChange={() => toggle(role, section)} />
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {error && <div className="error-text" style={{ marginTop: 10 }}>{error}</div>}
+      {success && <div style={{ color: "#146c43", fontSize: 13, margin: "10px 0" }}>{success}</div>}
+      <button className="btn btn-primary" onClick={save} disabled={saving} style={{ marginTop: 10 }}>
+        {saving ? "Saving…" : "Save Permissions"}
+      </button>
     </div>
   );
 }

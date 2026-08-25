@@ -1,603 +1,876 @@
-import { useEffect, useMemo, useState } from "react";
-import { api, ApiRequestError } from "../lib/api";
-import { useAuth } from "../context/AuthContext";
-import { money, dateTime } from "../lib/format";
-import { Receipt } from "../components/Receipt";
-import type { ReceiptData } from "../lib/receipt";
-import {
-  generateId,
-  applyLocalStockDecrement,
-  decrementCachedStock,
-  enqueueSale,
-  loadCustomersCache,
-  loadProductsCache,
-  saveCustomersCache,
-  saveProductsCache,
-} from "../lib/offline";
-
-interface Product {
-  id: string;
-  name: string;
-  sku: string | null;
-  sellPrice: string;
-  taxRate: string;
-  quantity: string;
-  imageUrl: string | null;
-  unit: string;
-  category: string | null;
+import { Router, type Response } from "express";
+import { z } from "zod";
+import { prisma } from "../lib/prisma";
+import { asyncHandler } from "../utils/asyncHandler";
+import { requireBusinessAuth, requireRole } from "../middleware/auth";
+import { requireActiveLicense } from "../middleware/license";
+import { toCsv } from "../utils/csv";
+import { badRequest } from "../utils/errors";
+ 
+export const dataToolsRouter = Router();
+dataToolsRouter.use(requireBusinessAuth);
+ 
+function sendCsv(res: Response, filename: string, csv: string) {
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.send(csv);
 }
-
-/** Renders a quantity with its unit, e.g. "12.5 kg" — bare units like "each" are omitted since they're implied. */
-function qtyLabel(qty: string | number, unit: string) {
-  return unit && unit !== "each" ? `${qty} ${unit}` : `${qty}`;
-}
-
-interface Customer {
-  id: string;
-  name: string;
-}
-
-interface CartLine {
-  product: Product;
-  quantity: number;
-  discount: number;
-}
-
-const PAYMENT_METHODS = [
-  "CASH",
-  "CARD",
-  "MOBILE_MONEY",
-  "ORANGE_MONEY",
-  "MYZAKA",
-  "SMEGA",
-  "BANK_TRANSFER",
-  "ACCOUNT",
-] as const;
-
-// A recent completed sale, as returned by GET /sales — just enough to list
-// and pick from when voiding something other than the sale just rung up.
-interface RecentSale {
-  id: string;
-  saleNumber: string;
-  total: string;
-  status: string;
-  createdAt: string;
-  cashier: { name: string };
-}
-
-export function PosPage() {
-  const { business, user, can } = useAuth();
-  const businessId = business?.id || "";
-  const canLaybuy = can("laybuys");
-  const [receiptSale, setReceiptSale] = useState<ReceiptData | null>(null);
-  const [products, setProducts] = useState<Product[]>([]);
-  const [managedCategories, setManagedCategories] = useState<{ id: string; name: string }[]>([]);
-  const [selectedCategory, setSelectedCategory] = useState("");
-  const [customers, setCustomers] = useState<Customer[]>([]);
-  const [search, setSearch] = useState("");
-  const [cart, setCart] = useState<CartLine[]>([]);
-  const [customerId, setCustomerId] = useState("");
-  const [paymentMethod, setPaymentMethod] = useState<(typeof PAYMENT_METHODS)[number]>("CASH");
-  const [amountPaid, setAmountPaid] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-
-  // Laybuy: the customer pays a deposit now, stock is reserved immediately,
-  // and they collect (and the sale only counts as COMPLETED) once it's paid
-  // off from the Laybuys tab on the Sales page.
-  const [isLaybuy, setIsLaybuy] = useState(false);
-
-  // "Void a Sale" — a standing option on this screen (not just the receipt
-  // shown right after checkout) so a sale from earlier in the shift can be
-  // voided without leaving the register. Same manager-override rule applies:
-  // a cashier must supply a manager/admin/owner's own password to confirm.
-  const needsApproval = user?.role === "CASHIER";
-  const [showVoidPicker, setShowVoidPicker] = useState(false);
-  const [recentSales, setRecentSales] = useState<RecentSale[]>([]);
-  const [loadingRecent, setLoadingRecent] = useState(false);
-  const [voidingSale, setVoidingSale] = useState<RecentSale | null>(null);
-  const [voidReason, setVoidReason] = useState("");
-  const [approverEmail, setApproverEmail] = useState("");
-  const [approverPassword, setApproverPassword] = useState("");
-  const [voidError, setVoidError] = useState<string | null>(null);
-  const [voidSubmitting, setVoidSubmitting] = useState(false);
-
-  useEffect(() => {
-    loadProducts();
-    loadCustomers();
-    api.get<{ id: string; name: string }[]>("/categories").then(setManagedCategories).catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [businessId]);
-
-  // Falls back to the last cached catalog when the network call fails (most
-  // often because we're offline) — the unfiltered list is what gets cached,
-  // and a search term is applied client-side against it in that case, since
-  // there's no backend to ask while offline.
-  function loadProducts(q?: string) {
-    api
-      .get<Product[]>(`/products${q ? `?q=${encodeURIComponent(q)}` : ""}`)
-      .then((data) => {
-        setProducts(data);
-        if (!q && businessId) saveProductsCache(businessId, data);
-      })
-      .catch(() => {
-        if (!businessId) return;
-        const cached = loadProductsCache<Product>(businessId);
-        if (!cached) return;
-        if (!q) {
-          setProducts(cached);
-          return;
-        }
-        const needle = q.toLowerCase();
-        setProducts(cached.filter((p) => p.name.toLowerCase().includes(needle) || (p.sku || "").toLowerCase().includes(needle)));
-      });
-  }
-
-  function loadCustomers() {
-    api
-      .get<Customer[]>("/customers")
-      .then((data) => {
-        setCustomers(data);
-        if (businessId) saveCustomersCache(businessId, data);
-      })
-      .catch(() => {
-        if (!businessId) return;
-        const cached = loadCustomersCache<Customer>(businessId);
-        if (cached) setCustomers(cached);
-      });
-  }
-
-  // Tabs combine the managed category list with any category text already
-  // in use on a loaded product, so nothing gets left off the shelf.
-  const categoryTabs = Array.from(
-    new Set([...managedCategories.map((c) => c.name), ...products.map((p) => p.category).filter((c): c is string => !!c)])
-  ).sort((a, b) => a.localeCompare(b));
-  const visibleProducts = selectedCategory ? products.filter((p) => p.category === selectedCategory) : products;
-
-  function addToCart(product: Product) {
-    setCart((prev) => {
-      const existing = prev.find((l) => l.product.id === product.id);
-      if (existing) {
-        return prev.map((l) => (l.product.id === product.id ? { ...l, quantity: l.quantity + 1 } : l));
-      }
-      return [...prev, { product, quantity: 1, discount: 0 }];
+ 
+/**
+ * Export & import are restricted to owner/admin/manager, matching the rest
+ * of the app's write-sensitive routes — a cashier has no business reason to
+ * pull the full customer list or sales history off the system.
+ */
+const CAN_USE_DATA_TOOLS = requireRole("OWNER", "ADMIN", "MANAGER");
+ 
+dataToolsRouter.get(
+  "/export/products.csv",
+  CAN_USE_DATA_TOOLS,
+  asyncHandler(async (req, res) => {
+    const products = await prisma.product.findMany({
+      where: { businessId: req.auth!.businessId, isActive: true },
+      orderBy: { name: "asc" },
     });
-  }
-
-  function updateLine(productId: string, patch: Partial<CartLine>) {
-    setCart((prev) => prev.map((l) => (l.product.id === productId ? { ...l, ...patch } : l)));
-  }
-
-  function removeLine(productId: string) {
-    setCart((prev) => prev.filter((l) => l.product.id !== productId));
-  }
-
-  const totals = useMemo(() => {
-    let subtotal = 0;
-    let taxTotal = 0;
-    let discountTotal = 0;
-    for (const line of cart) {
-      const lineSubtotal = Number(line.product.sellPrice) * line.quantity - line.discount;
-      const lineTax = lineSubtotal * (Number(line.product.taxRate) / 100);
-      subtotal += Number(line.product.sellPrice) * line.quantity;
-      discountTotal += line.discount;
-      taxTotal += lineTax;
-    }
-    return { subtotal, taxTotal, discountTotal, total: subtotal - discountTotal + taxTotal };
-  }, [cart]);
-
-  const paid = Number(amountPaid) || 0;
-  const changeDue = Math.max(0, paid - totals.total);
-
-  async function checkout() {
-    if (!cart.length) return;
-    setError(null);
-    setSuccess(null);
-
-    if (isLaybuy) {
-      if (!customerId) {
-        setError("Select a customer to start a laybuy.");
-        return;
+    const csv = toCsv(
+      ["name", "sku", "barcode", "category", "unit", "costPrice", "sellPrice", "taxRate", "quantity", "reorderLevel"],
+      products.map((p) => ({
+        name: p.name,
+        sku: p.sku || "",
+        barcode: p.barcode || "",
+        category: p.category || "",
+        unit: p.unit,
+        costPrice: p.costPrice,
+        sellPrice: p.sellPrice,
+        taxRate: p.taxRate,
+        quantity: p.quantity,
+        reorderLevel: p.reorderLevel,
+      }))
+    );
+    sendCsv(res, "products.csv", csv);
+  })
+);
+ 
+dataToolsRouter.get(
+  "/export/sales.csv",
+  CAN_USE_DATA_TOOLS,
+  asyncHandler(async (req, res) => {
+    const sales = await prisma.sale.findMany({
+      where: { businessId: req.auth!.businessId },
+      include: { customer: true, cashier: { select: { name: true } } },
+      orderBy: { createdAt: "desc" },
+      take: 10000,
+    });
+    const csv = toCsv(
+      ["saleNumber", "date", "cashier", "customer", "paymentMethod", "status", "subtotal", "discount", "tax", "total", "amountPaid", "changeDue"],
+      sales.map((s) => ({
+        saleNumber: s.saleNumber,
+        date: s.createdAt.toISOString(),
+        cashier: s.cashier?.name || "",
+        customer: s.customer?.name || "Walk-in",
+        paymentMethod: s.paymentMethod,
+        status: s.status,
+        subtotal: s.subtotal,
+        discount: s.discountTotal,
+        tax: s.taxTotal,
+        total: s.total,
+        amountPaid: s.amountPaid,
+        changeDue: s.changeDue,
+      }))
+    );
+    sendCsv(res, "sales.csv", csv);
+  })
+);
+ 
+dataToolsRouter.get(
+  "/export/customers.csv",
+  CAN_USE_DATA_TOOLS,
+  asyncHandler(async (req, res) => {
+    const customers = await prisma.customer.findMany({
+      where: { businessId: req.auth!.businessId },
+      orderBy: { name: "asc" },
+    });
+    const csv = toCsv(
+      ["name", "idNumber", "phone", "email", "address", "dateOfBirth", "nextOfKinName", "nextOfKinPhone", "notes", "balance"],
+      customers.map((c) => ({
+        name: c.name,
+        idNumber: c.idNumber || "",
+        phone: c.phone || "",
+        email: c.email || "",
+        address: c.address || "",
+        dateOfBirth: c.dateOfBirth ? c.dateOfBirth.toISOString() : "",
+        nextOfKinName: c.nextOfKinName || "",
+        nextOfKinPhone: c.nextOfKinPhone || "",
+        notes: c.notes || "",
+        balance: c.balance,
+      }))
+    );
+    sendCsv(res, "customers.csv", csv);
+  })
+);
+ 
+dataToolsRouter.get(
+  "/export/suppliers.csv",
+  CAN_USE_DATA_TOOLS,
+  asyncHandler(async (req, res) => {
+    const suppliers = await prisma.supplier.findMany({
+      where: { businessId: req.auth!.businessId },
+      orderBy: { name: "asc" },
+    });
+    const csv = toCsv(
+      ["name", "phone", "email", "address", "balance"],
+      suppliers.map((s) => ({ name: s.name, phone: s.phone || "", email: s.email || "", address: s.address || "", balance: s.balance }))
+    );
+    sendCsv(res, "suppliers.csv", csv);
+  })
+);
+ 
+dataToolsRouter.get(
+  "/export/purchases.csv",
+  CAN_USE_DATA_TOOLS,
+  asyncHandler(async (req, res) => {
+    const purchases = await prisma.purchase.findMany({
+      where: { businessId: req.auth!.businessId },
+      include: { supplier: true },
+      orderBy: { createdAt: "desc" },
+      take: 10000,
+    });
+    const csv = toCsv(
+      ["purchaseNumber", "supplier", "date", "status", "total"],
+      purchases.map((p) => ({
+        purchaseNumber: p.purchaseNumber,
+        supplier: p.supplier?.name || "",
+        date: p.createdAt.toISOString(),
+        status: p.status,
+        total: p.total,
+      }))
+    );
+    sendCsv(res, "purchases.csv", csv);
+  })
+);
+ 
+dataToolsRouter.get(
+  "/export/expenses.csv",
+  CAN_USE_DATA_TOOLS,
+  asyncHandler(async (req, res) => {
+    const expenses = await prisma.expense.findMany({
+      where: { businessId: req.auth!.businessId },
+      orderBy: { date: "desc" },
+      take: 10000,
+    });
+    const csv = toCsv(
+      ["date", "category", "description", "amount"],
+      expenses.map((e) => ({
+        date: e.date.toISOString(),
+        category: e.category,
+        description: e.description || "",
+        amount: e.amount,
+      }))
+    );
+    sendCsv(res, "expenses.csv", csv);
+  })
+);
+ 
+dataToolsRouter.get(
+  "/export/invoices.csv",
+  CAN_USE_DATA_TOOLS,
+  asyncHandler(async (req, res) => {
+    const invoices = await prisma.invoice.findMany({
+      where: { businessId: req.auth!.businessId },
+      include: { customer: true },
+      orderBy: { createdAt: "desc" },
+      take: 10000,
+    });
+    const csv = toCsv(
+      ["invoiceNumber", "customer", "date", "dueDate", "status", "subtotal", "tax", "total", "amountPaid", "outstanding"],
+      invoices.map((i) => ({
+        invoiceNumber: i.invoiceNumber,
+        customer: i.customer?.name || "",
+        date: i.createdAt.toISOString(),
+        dueDate: i.dueDate ? i.dueDate.toISOString() : "",
+        status: i.status,
+        subtotal: i.subtotal,
+        tax: i.taxTotal,
+        total: i.total,
+        amountPaid: i.amountPaid,
+        outstanding: Number(i.total) - Number(i.amountPaid),
+      }))
+    );
+    sendCsv(res, "invoices.csv", csv);
+  })
+);
+ 
+dataToolsRouter.get(
+  "/export/quotations.csv",
+  CAN_USE_DATA_TOOLS,
+  asyncHandler(async (req, res) => {
+    const quotations = await prisma.quotation.findMany({
+      where: { businessId: req.auth!.businessId },
+      include: { customer: true },
+      orderBy: { createdAt: "desc" },
+      take: 10000,
+    });
+    const csv = toCsv(
+      ["quoteNumber", "customer", "date", "validUntil", "status", "subtotal", "tax", "total"],
+      quotations.map((q) => ({
+        quoteNumber: q.quoteNumber,
+        customer: q.customer?.name || "",
+        date: q.createdAt.toISOString(),
+        validUntil: q.validUntil ? q.validUntil.toISOString() : "",
+        status: q.status,
+        subtotal: q.subtotal,
+        tax: q.taxTotal,
+        total: q.total,
+      }))
+    );
+    sendCsv(res, "quotations.csv", csv);
+  })
+);
+ 
+/** Open laybuys only — a Sale with status HELD — with the outstanding
+ * balance still owed. Completed/voided laybuys already show up in the
+ * regular sales.csv export. */
+dataToolsRouter.get(
+  "/export/laybuys.csv",
+  CAN_USE_DATA_TOOLS,
+  asyncHandler(async (req, res) => {
+    const sales = await prisma.sale.findMany({
+      where: { businessId: req.auth!.businessId, status: "HELD" },
+      include: { customer: true },
+      orderBy: { createdAt: "desc" },
+      take: 10000,
+    });
+    const csv = toCsv(
+      ["saleNumber", "customer", "date", "total", "amountPaid", "balance"],
+      sales.map((s) => ({
+        saleNumber: s.saleNumber,
+        customer: s.customer?.name || "",
+        date: s.createdAt.toISOString(),
+        total: s.total,
+        amountPaid: s.amountPaid,
+        balance: Number(s.total) - Number(s.amountPaid),
+      }))
+    );
+    sendCsv(res, "laybuys.csv", csv);
+  })
+);
+ 
+dataToolsRouter.get(
+  "/export/staff.csv",
+  CAN_USE_DATA_TOOLS,
+  asyncHandler(async (req, res) => {
+    const staff = await prisma.user.findMany({
+      where: { businessId: req.auth!.businessId },
+      orderBy: { name: "asc" },
+    });
+    const csv = toCsv(
+      ["name", "email", "role", "status", "lastLoginAt"],
+      staff.map((u) => ({
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        status: u.status,
+        lastLoginAt: u.lastLoginAt ? u.lastLoginAt.toISOString() : "",
+      }))
+    );
+    sendCsv(res, "staff.csv", csv);
+  })
+);
+ 
+dataToolsRouter.get(
+  "/export/shifts.csv",
+  CAN_USE_DATA_TOOLS,
+  asyncHandler(async (req, res) => {
+    const shifts = await prisma.shift.findMany({
+      where: { businessId: req.auth!.businessId },
+      include: { cashier: { select: { name: true } } },
+      orderBy: { openedAt: "desc" },
+      take: 10000,
+    });
+    const csv = toCsv(
+      ["cashier", "openedAt", "closedAt", "openingBalance", "closingBalance", "expectedBalance", "status"],
+      shifts.map((s) => ({
+        cashier: s.cashier?.name || "",
+        openedAt: s.openedAt.toISOString(),
+        closedAt: s.closedAt ? s.closedAt.toISOString() : "",
+        openingBalance: s.openingBalance,
+        closingBalance: s.closingBalance ?? "",
+        expectedBalance: s.expectedBalance ?? "",
+        status: s.status,
+      }))
+    );
+    sendCsv(res, "shifts.csv", csv);
+  })
+);
+ 
+const importRowSchema = z.object({
+  name: z.string().min(1),
+  sku: z.string().optional(),
+  barcode: z.string().optional(),
+  category: z.string().optional(),
+  unit: z.string().optional(),
+  costPrice: z.number().nonnegative().optional(),
+  sellPrice: z.number().nonnegative(),
+  taxRate: z.number().nonnegative().optional(),
+  quantity: z.number().nonnegative().optional(),
+  reorderLevel: z.number().nonnegative().optional(),
+});
+ 
+const importSchema = z.object({ rows: z.array(z.record(z.any())).min(1).max(5000) });
+ 
+/**
+ * Bulk product import from a CSV parsed client-side into row objects. Each
+ * row is validated and applied independently so one bad row doesn't sink
+ * the whole batch. A row whose SKU matches an existing product updates its
+ * details (name/prices/etc) but deliberately never touches its quantity —
+ * stock changes always go through /products/:id/adjust so there's an audit
+ * trail; only brand-new products get their quantity column applied, as
+ * opening stock (mirroring manual product creation via POST /products).
+ */
+dataToolsRouter.post(
+  "/import/products",
+  CAN_USE_DATA_TOOLS,
+  requireActiveLicense(),
+  asyncHandler(async (req, res) => {
+    const { rows } = importSchema.parse(req.body);
+    const businessId = req.auth!.businessId;
+ 
+    let created = 0;
+    let updated = 0;
+    const errors: { row: number; message: string }[] = [];
+ 
+    for (let i = 0; i < rows.length; i++) {
+      const rowNum = i + 2; // header is row 1 in the source spreadsheet
+      const parsed = importRowSchema.safeParse(rows[i]);
+      if (!parsed.success) {
+        errors.push({ row: rowNum, message: parsed.error.issues[0]?.message || "Invalid row" });
+        continue;
       }
-      if (!paid) {
-        setError("Enter a deposit amount.");
-        return;
-      }
-      if (paid >= totals.total) {
-        setError("A deposit can't cover the full total — that's just a regular sale. Uncheck Laybuy to charge in full.");
-        return;
-      }
-    }
-
-    const amountToRecord = isLaybuy ? paid : paid || totals.total;
-
-    // Sent whether this ends up going straight through or getting queued —
-    // the same clientRef either way makes a retried/replayed request safe
-    // (see POST /sales on the backend).
-    const clientRef = generateId();
-    const items = cart.map((l) => ({
-      productId: l.product.id,
-      quantity: l.quantity,
-      unitPrice: Number(l.product.sellPrice),
-      discount: l.discount,
-    }));
-    const payload = {
-      items,
-      customerId: customerId || undefined,
-      amountPaid: amountToRecord,
-      paymentMethod,
-      isLaybuy,
-      clientRef,
-    };
-
-    setSubmitting(true);
-    try {
-      let sale: { id: string; saleNumber: string; createdAt: string } | null = null;
-      let queued = false;
-
-      if (navigator.onLine) {
-        try {
-          sale = await api.post<{ id: string; saleNumber: string; createdAt: string }>("/sales", payload);
-        } catch (err) {
-          if (err instanceof ApiRequestError) throw err; // a real rejection — surface it below, don't queue it
-          queued = true; // fetch itself failed (a network hiccup) despite navigator.onLine — fall back to queuing
+      const data = parsed.data;
+      try {
+        const existing = data.sku ? await prisma.product.findFirst({ where: { businessId, sku: data.sku } }) : null;
+ 
+        if (existing) {
+          await prisma.product.update({
+            where: { id: existing.id },
+            data: {
+              name: data.name,
+              barcode: data.barcode,
+              category: data.category,
+              unit: data.unit,
+              costPrice: data.costPrice,
+              sellPrice: data.sellPrice,
+              taxRate: data.taxRate,
+              reorderLevel: data.reorderLevel,
+            },
+          });
+          updated++;
+        } else {
+          await prisma.$transaction(async (tx) => {
+            const p = await tx.product.create({
+              data: {
+                businessId,
+                name: data.name,
+                sku: data.sku,
+                barcode: data.barcode,
+                category: data.category,
+                unit: data.unit || "each",
+                costPrice: data.costPrice ?? 0,
+                sellPrice: data.sellPrice,
+                taxRate: data.taxRate ?? 0,
+                quantity: data.quantity ?? 0,
+                reorderLevel: data.reorderLevel ?? 0,
+              },
+            });
+            if ((data.quantity ?? 0) > 0) {
+              await tx.stockMovement.create({
+                data: { businessId, productId: p.id, type: "OPENING", quantity: data.quantity!, reason: "Imported from CSV" },
+              });
+            }
+          });
+          created++;
         }
-      } else {
-        queued = true;
+      } catch (err: any) {
+        errors.push({ row: rowNum, message: err?.code === "P2002" ? "Duplicate SKU" : "Failed to save this row" });
       }
-
-      if (queued) {
-        enqueueSale(businessId, payload);
-        decrementCachedStock(businessId, items);
-        setProducts((prev) => applyLocalStockDecrement(prev, items));
-        setSuccess(
-          isLaybuy
-            ? "Laybuy saved offline — it'll start syncing automatically once you're back online."
-            : `Sale saved offline (${cart.length} item${cart.length === 1 ? "" : "s"}) — it'll sync automatically once you're back online.`
-        );
-      } else if (sale) {
-        setSuccess(
-          isLaybuy
-            ? `Laybuy ${sale.saleNumber} started — deposit recorded. Manage it from Sales → Laybuys.`
-            : `Sale ${sale.saleNumber} completed.`
-        );
-      }
-
-      // Built from the cart still in memory rather than re-fetching — the
-      // sale response doesn't include product names, and this data is only
-      // needed for the receipt shown immediately after checkout. A queued
-      // sale doesn't have a server-assigned id/number yet, so a placeholder
-      // is shown until it syncs (see `pending` on ReceiptData).
-      setReceiptSale({
-        id: sale?.id || `offline-${clientRef}`,
-        saleNumber: sale?.saleNumber || `Pending sync · ${clientRef.slice(0, 8).toUpperCase()}`,
-        createdAt: sale?.createdAt || new Date().toISOString(),
-        cashierName: user?.name || "",
-        customerName: customerId ? customers.find((c) => c.id === customerId)?.name || null : null,
-        paymentMethod,
-        items: cart.map((l) => ({
-          name: l.product.name,
-          unit: l.product.unit,
-          quantity: l.quantity,
-          unitPrice: Number(l.product.sellPrice),
-          total: Number(l.product.sellPrice) * l.quantity,
-        })),
-        subtotal: totals.subtotal,
-        discountTotal: totals.discountTotal,
-        taxTotal: totals.taxTotal,
-        total: totals.total,
-        amountPaid: amountToRecord,
-        changeDue,
-        pending: queued,
-      });
-      setCart([]);
-      setAmountPaid("");
-      setIsLaybuy(false);
-      if (!queued) loadProducts();
-    } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Checkout failed");
-    } finally {
-      setSubmitting(false);
     }
-  }
-
-  function openVoidPicker() {
-    setShowVoidPicker(true);
-    setVoidingSale(null);
-    setLoadingRecent(true);
-    api
-      .get<RecentSale[]>("/sales")
-      .then((all) => setRecentSales(all.filter((s) => s.status === "COMPLETED").slice(0, 15)))
-      .catch(() => setRecentSales([]))
-      .finally(() => setLoadingRecent(false));
-  }
-
-  function closeVoidPicker() {
-    setShowVoidPicker(false);
-    setVoidingSale(null);
-  }
-
-  function selectSaleToVoid(s: RecentSale) {
-    setVoidingSale(s);
-    setVoidReason("");
-    setApproverEmail("");
-    setApproverPassword("");
-    setVoidError(null);
-  }
-
-  async function submitVoidFromPicker() {
-    if (!voidingSale) return;
-    if (!voidReason.trim()) {
-      setVoidError("A reason is required");
-      return;
-    }
-    if (needsApproval && (!approverEmail.trim() || !approverPassword)) {
-      setVoidError("A manager, admin, or owner needs to approve this — enter their email and password.");
-      return;
-    }
-    setVoidError(null);
-    setVoidSubmitting(true);
-    try {
-      await api.post(`/sales/${voidingSale.id}/void`, {
-        reason: voidReason.trim(),
-        ...(needsApproval ? { approverEmail: approverEmail.trim(), approverPassword } : {}),
-      });
-      setShowVoidPicker(false);
-      setVoidingSale(null);
-      loadProducts();
-    } catch (err) {
-      setVoidError(err instanceof ApiRequestError ? err.message : "Failed to void sale");
-    } finally {
-      setVoidSubmitting(false);
-    }
-  }
-
-  return (
-    <div>
-      <div className="flex-between" style={{ marginBottom: 14 }}>
-        <h2 style={{ margin: 0 }}>Point of Sale</h2>
-        <div className="gap-8" style={{ alignItems: "center" }}>
-          <button className="btn btn-danger btn-sm" onClick={openVoidPicker}>
-            Void a Sale
-          </button>
-          <input
-            placeholder="Search product name, SKU or barcode…"
-            style={{ width: 320 }}
-            value={search}
-            onChange={(e) => {
-              setSearch(e.target.value);
-              loadProducts(e.target.value);
-            }}
-          />
-        </div>
-      </div>
-
-      <div className="pos-layout">
-        <div className="product-panel">
-          {categoryTabs.length > 0 && (
-            <div className="category-tabs">
-              <button className={`category-tab${selectedCategory === "" ? " active" : ""}`} onClick={() => setSelectedCategory("")}>
-                All
-              </button>
-              {categoryTabs.map((c) => (
-                <button
-                  key={c}
-                  className={`category-tab${selectedCategory === c ? " active" : ""}`}
-                  onClick={() => setSelectedCategory(c)}
-                >
-                  {c}
-                </button>
-              ))}
-            </div>
-          )}
-          <div className="product-grid">
-          {visibleProducts.map((p) => (
-            <button key={p.id} className="product-tile" onClick={() => addToCart(p)} disabled={Number(p.quantity) <= 0}>
-              {p.imageUrl ? (
-                <img src={p.imageUrl} alt={p.name} className="product-tile-img" />
-              ) : (
-                <div className="product-tile-img product-tile-img-placeholder">{p.name.charAt(0).toUpperCase()}</div>
-              )}
-              <div className="name">{p.name}</div>
-              <div className="price">{money(p.sellPrice, business?.currency)}</div>
-              <div className="stock">{Number(p.quantity) <= 0 ? "Out of stock" : `${qtyLabel(p.quantity, p.unit)} in stock`}</div>
-            </button>
-          ))}
-          {!visibleProducts.length && <p className="muted">No products found.</p>}
-          </div>
-        </div>
-
-        <div className="cart-panel">
-          <div className="cart-items">
-            {cart.map((line) => (
-              <div className="cart-line" key={line.product.id}>
-                <div style={{ flex: 1 }}>
-                  <div>{line.product.name}</div>
-                  <div className="muted">
-                    {money(line.product.sellPrice, business?.currency)}
-                    {line.product.unit && line.product.unit !== "each" ? ` / ${line.product.unit}` : " each"}
-                  </div>
-                </div>
-                <input
-                  type="number"
-                  min={0.01}
-                  step="any"
-                  style={{ width: 64 }}
-                  value={line.quantity}
-                  onChange={(e) => updateLine(line.product.id, { quantity: Math.max(0.01, Number(e.target.value) || 0.01) })}
-                />
-                {line.product.unit && line.product.unit !== "each" && (
-                  <span className="muted" style={{ fontSize: 11.5, marginLeft: 4 }}>{line.product.unit}</span>
-                )}
-                <button className="btn btn-secondary btn-sm" onClick={() => removeLine(line.product.id)} style={{ marginLeft: 6 }}>
-                  ✕
-                </button>
-              </div>
-            ))}
-            {!cart.length && <p className="muted">Cart is empty — tap a product to add it.</p>}
-          </div>
-
-          <div className="field" style={{ marginTop: 10 }}>
-            <label>Customer {isLaybuy ? "*" : "(optional)"}</label>
-            <select value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
-              <option value="">Walk-in customer</option>
-              {customers.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
-          </div>
-
-          {canLaybuy && (
-            <div className="field" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <input
-                type="checkbox"
-                id="isLaybuy"
-                checked={isLaybuy}
-                onChange={(e) => setIsLaybuy(e.target.checked)}
-                style={{ width: "auto" }}
-              />
-              <label htmlFor="isLaybuy" style={{ margin: 0 }}>This is a Laybuy</label>
-            </div>
-          )}
-          {canLaybuy && isLaybuy && (
-            <p className="muted" style={{ marginTop: -6, marginBottom: 10, fontSize: 12.5 }}>
-              Stock is reserved now. Pick the customer above, then enter their deposit below — they collect once it's
-              paid off from Sales → Laybuys.
-            </p>
-          )}
-
-          <div className="field">
-            <label>Payment method</label>
-            <select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value as any)}>
-              {PAYMENT_METHODS.map((m) => (
-                <option key={m} value={m}>{m.replace("_", " ")}</option>
-              ))}
-            </select>
-          </div>
-
-          <div className="field">
-            <label>{isLaybuy ? "Deposit amount *" : "Amount paid"}</label>
-            <input
-              type="number"
-              min={0}
-              placeholder={isLaybuy ? "0.00" : totals.total.toFixed(2)}
-              value={amountPaid}
-              onChange={(e) => setAmountPaid(e.target.value)}
-            />
-          </div>
-
-          <div className="cart-totals">
-            <div className="row"><span>Subtotal</span><span>{money(totals.subtotal, business?.currency)}</span></div>
-            <div className="row"><span>Discount</span><span>-{money(totals.discountTotal, business?.currency)}</span></div>
-            <div className="row"><span>Tax</span><span>{money(totals.taxTotal, business?.currency)}</span></div>
-            <div className="row total"><span>Total</span><span>{money(totals.total, business?.currency)}</span></div>
-            {!isLaybuy && paid > 0 && <div className="row"><span>Change due</span><span>{money(changeDue, business?.currency)}</span></div>}
-            {isLaybuy && paid > 0 && (
-              <div className="row"><span>Balance after deposit</span><span>{money(Math.max(0, totals.total - paid), business?.currency)}</span></div>
-            )}
-          </div>
-
-          {error && <div className="error-text">{error}</div>}
-          {success && <div style={{ color: "#146c43", fontSize: 13, margin: "8px 0" }}>{success}</div>}
-
-          <button className="btn btn-primary" style={{ marginTop: 10, justifyContent: "center" }} disabled={!cart.length || submitting} onClick={checkout}>
-            {submitting
-              ? "Processing…"
-              : isLaybuy
-              ? `Start Laybuy (Deposit ${money(paid || 0, business?.currency)})`
-              : `Charge ${money(totals.total, business?.currency)}`}
-          </button>
-        </div>
-      </div>
-
-      {receiptSale && (
-        <Receipt
-          sale={receiptSale}
-          onClose={() => setReceiptSale(null)}
-          allowVoid
-          onVoided={() => {
-            setReceiptSale(null);
-            loadProducts();
-          }}
-        />
-      )}
-
-      {showVoidPicker && (
-        <div className="modal-overlay" onClick={closeVoidPicker}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            {!voidingSale ? (
-              <>
-                <h3 style={{ marginTop: 0 }}>Void a Sale</h3>
-                <p className="muted" style={{ marginTop: -6 }}>
-                  Pick a recent sale to void. This restocks the items and marks the sale voided — it can't be undone.
-                </p>
-                {loadingRecent && <p className="muted">Loading…</p>}
-                {!loadingRecent && !recentSales.length && <p className="muted">No completed sales to void.</p>}
-                <div style={{ maxHeight: 320, overflowY: "auto" }}>
-                  {recentSales.map((s) => (
-                    <div
-                      key={s.id}
-                      className="flex-between"
-                      style={{ padding: "8px 0", borderBottom: "1px solid var(--border)" }}
-                    >
-                      <div>
-                        <div>{s.saleNumber}</div>
-                        <div className="muted" style={{ fontSize: 12 }}>
-                          {s.cashier?.name} · {dateTime(s.createdAt)} · {money(s.total, business?.currency)}
-                        </div>
-                      </div>
-                      <button className="btn btn-danger btn-sm" onClick={() => selectSaleToVoid(s)}>
-                        Void
-                      </button>
-                    </div>
-                  ))}
-                </div>
-                <div className="gap-8" style={{ marginTop: 12 }}>
-                  <button className="btn btn-secondary" onClick={closeVoidPicker}>Close</button>
-                </div>
-              </>
-            ) : (
-              <>
-                <h3 style={{ marginTop: 0 }}>Void sale {voidingSale.saleNumber}</h3>
-                <p className="muted" style={{ marginTop: -6 }}>
-                  This restocks the items and marks the sale voided. It can't be undone.
-                </p>
-                <div className="field">
-                  <label>Reason *</label>
-                  <input
-                    value={voidReason}
-                    onChange={(e) => setVoidReason(e.target.value)}
-                    placeholder="e.g. entered by mistake, customer walked away"
-                  />
-                </div>
-                {needsApproval && (
-                  <>
-                    <p className="muted" style={{ marginTop: -4, marginBottom: 10 }}>
-                      A manager, admin, or owner needs to approve this — enter their own login.
-                    </p>
-                    <div className="field">
-                      <label>Manager/Admin/Owner email *</label>
-                      <input value={approverEmail} onChange={(e) => setApproverEmail(e.target.value)} placeholder="their email" />
-                    </div>
-                    <div className="field">
-                      <label>Their password *</label>
-                      <input type="password" value={approverPassword} onChange={(e) => setApproverPassword(e.target.value)} />
-                    </div>
-                  </>
-                )}
-                {voidError && <div className="error-text">{voidError}</div>}
-                <div className="gap-8" style={{ marginTop: 10 }}>
-                  <button className="btn btn-danger" onClick={submitVoidFromPicker} disabled={voidSubmitting}>
-                    {voidSubmitting ? "Voiding…" : "Confirm Void"}
-                  </button>
-                  <button className="btn btn-secondary" onClick={() => setVoidingSale(null)}>Back</button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
+ 
+    res.json({ created, updated, errors });
+  })
+);
+ 
+/**
+ * Full-data backup: a single downloadable JSON snapshot of everything
+ * belonging to this business. Owner-only by design. Pairs with POST
+ * /restore below, which loads a file downloaded from here back in.
+ */
+dataToolsRouter.get(
+  "/backup",
+  requireRole("OWNER"),
+  asyncHandler(async (req, res) => {
+    const businessId = req.auth!.businessId;
+ 
+    const [
+      business,
+      license,
+      products,
+      categories,
+      customers,
+      suppliers,
+      sales,
+      purchases,
+      expenses,
+      invoices,
+      quotations,
+      staff,
+      shifts,
+      stockMovements,
+      terminals,
+    ] = await Promise.all([
+      prisma.business.findUnique({ where: { id: businessId } }),
+      prisma.license.findUnique({ where: { businessId } }),
+      prisma.product.findMany({ where: { businessId } }),
+      prisma.category.findMany({ where: { businessId } }),
+      prisma.customer.findMany({ where: { businessId } }),
+      prisma.supplier.findMany({ where: { businessId } }),
+      prisma.sale.findMany({ where: { businessId }, include: { items: true, laybuyPayments: true } }),
+      prisma.purchase.findMany({ where: { businessId }, include: { items: true } }),
+      prisma.expense.findMany({ where: { businessId } }),
+      prisma.invoice.findMany({ where: { businessId } }),
+      prisma.quotation.findMany({ where: { businessId } }),
+      prisma.user.findMany({
+        where: { businessId },
+        select: { id: true, name: true, email: true, role: true, status: true, lastLoginAt: true, createdAt: true },
+      }),
+      prisma.shift.findMany({ where: { businessId }, include: { cashMovements: true } }),
+      prisma.stockMovement.findMany({ where: { businessId } }),
+      prisma.terminal.findMany({ where: { businessId } }),
+    ]);
+ 
+    const backup = {
+      generatedAt: new Date().toISOString(),
+      businessId,
+      business,
+      license,
+      products,
+      categories,
+      customers,
+      suppliers,
+      sales,
+      purchases,
+      expenses,
+      invoices,
+      quotations,
+      staff, // never includes password hashes
+      shifts,
+      stockMovements,
+      terminals,
+    };
+ 
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="pula-pos-backup-${businessId}.json"`);
+    res.send(JSON.stringify(backup, null, 2));
+  })
+);
+ 
+/* ------------------------------- Restore ---------------------------------- */
+// Converts a JSON value that may be an ISO date string (or already absent)
+// into a Date, for a field that's always present in a valid backup row.
+function toDate(v: unknown): Date {
+  return new Date(v as string);
 }
+// Same, but for an optional/nullable datetime field.
+function toDateOrNull(v: unknown): Date | null {
+  return v === null || v === undefined ? null : new Date(v as string);
+}
+ 
+function mapCategory(businessId: string) {
+  return (c: any) => ({ id: c.id, businessId, name: c.name, createdAt: toDate(c.createdAt) });
+}
+function mapProduct(businessId: string) {
+  return (p: any) => ({
+    id: p.id,
+    businessId,
+    name: p.name,
+    sku: p.sku ?? null,
+    barcode: p.barcode ?? null,
+    category: p.category ?? null,
+    unit: p.unit || "each",
+    costPrice: p.costPrice,
+    sellPrice: p.sellPrice,
+    taxRate: p.taxRate,
+    quantity: p.quantity,
+    reorderLevel: p.reorderLevel,
+    imageUrl: p.imageUrl ?? null,
+    isActive: p.isActive ?? true,
+    createdAt: toDate(p.createdAt),
+    updatedAt: toDate(p.updatedAt ?? p.createdAt),
+  });
+}
+function mapSupplier(businessId: string) {
+  return (s: any) => ({
+    id: s.id,
+    businessId,
+    name: s.name,
+    phone: s.phone ?? null,
+    email: s.email ?? null,
+    address: s.address ?? null,
+    balance: s.balance,
+    createdAt: toDate(s.createdAt),
+  });
+}
+function mapCustomer(businessId: string) {
+  return (c: any) => ({
+    id: c.id,
+    businessId,
+    name: c.name,
+    idNumber: c.idNumber ?? null,
+    phone: c.phone ?? null,
+    email: c.email ?? null,
+    address: c.address ?? null,
+    dateOfBirth: toDateOrNull(c.dateOfBirth),
+    nextOfKinName: c.nextOfKinName ?? null,
+    nextOfKinPhone: c.nextOfKinPhone ?? null,
+    notes: c.notes ?? null,
+    balance: c.balance,
+    createdAt: toDate(c.createdAt),
+  });
+}
+function mapTerminal(businessId: string) {
+  return (t: any) => ({
+    id: t.id,
+    businessId,
+    name: t.name,
+    identifier: t.identifier,
+    isActive: t.isActive ?? true,
+    createdAt: toDate(t.createdAt),
+  });
+}
+function mapShift(businessId: string) {
+  return (s: any) => ({
+    id: s.id,
+    businessId,
+    terminalId: s.terminalId ?? null,
+    cashierId: s.cashierId,
+    openingBalance: s.openingBalance,
+    closingBalance: s.closingBalance ?? null,
+    expectedBalance: s.expectedBalance ?? null,
+    status: s.status || "OPEN",
+    openedAt: toDate(s.openedAt),
+    closedAt: toDateOrNull(s.closedAt),
+  });
+}
+function mapPurchase(businessId: string) {
+  return (p: any) => ({
+    id: p.id,
+    businessId,
+    purchaseNumber: p.purchaseNumber,
+    supplierId: p.supplierId,
+    total: p.total,
+    status: p.status || "RECEIVED",
+    createdAt: toDate(p.createdAt),
+  });
+}
+function mapPurchaseItem(purchaseId: string) {
+  return (it: any) => ({
+    id: it.id,
+    purchaseId,
+    productId: it.productId,
+    quantity: it.quantity,
+    unitCost: it.unitCost,
+    total: it.total,
+  });
+}
+function mapSale(businessId: string) {
+  return (s: any) => ({
+    id: s.id,
+    businessId,
+    saleNumber: s.saleNumber,
+    terminalId: s.terminalId ?? null,
+    cashierId: s.cashierId,
+    customerId: s.customerId ?? null,
+    shiftId: s.shiftId ?? null,
+    subtotal: s.subtotal,
+    taxTotal: s.taxTotal,
+    discountTotal: s.discountTotal,
+    total: s.total,
+    amountPaid: s.amountPaid,
+    changeDue: s.changeDue,
+    paymentMethod: s.paymentMethod || "CASH",
+    status: s.status || "COMPLETED",
+    // Only present on backups taken after offline mode shipped — older
+    // backups simply restore with this left null, same as before.
+    clientRef: s.clientRef ?? null,
+    createdAt: toDate(s.createdAt),
+  });
+}
+function mapSaleItem(saleId: string) {
+  return (it: any) => ({
+    id: it.id,
+    saleId,
+    productId: it.productId,
+    quantity: it.quantity,
+    unitPrice: it.unitPrice,
+    discount: it.discount,
+    taxAmount: it.taxAmount,
+    total: it.total,
+  });
+}
+function mapLaybuyPayment(businessId: string, saleId: string) {
+  return (lp: any) => ({
+    id: lp.id,
+    businessId,
+    saleId,
+    amount: lp.amount,
+    paymentMethod: lp.paymentMethod || "CASH",
+    createdBy: lp.createdBy ?? null,
+    createdAt: toDate(lp.createdAt),
+  });
+}
+function mapCashMovement(businessId: string, shiftId: string) {
+  return (cm: any) => ({
+    id: cm.id,
+    businessId,
+    shiftId,
+    type: cm.type,
+    amount: cm.amount,
+    reason: cm.reason ?? null,
+    createdById: cm.createdById,
+    createdAt: toDate(cm.createdAt),
+  });
+}
+function mapStockMovement(businessId: string) {
+  return (sm: any) => ({
+    id: sm.id,
+    businessId,
+    productId: sm.productId,
+    type: sm.type,
+    quantity: sm.quantity,
+    reason: sm.reason ?? null,
+    reference: sm.reference ?? null,
+    createdBy: sm.createdBy ?? null,
+    createdAt: toDate(sm.createdAt),
+  });
+}
+function mapExpense(businessId: string) {
+  return (e: any) => ({
+    id: e.id,
+    businessId,
+    category: e.category,
+    description: e.description ?? null,
+    amount: e.amount,
+    date: toDate(e.date),
+    createdBy: e.createdBy ?? null,
+    createdAt: toDate(e.createdAt),
+  });
+}
+function mapInvoice(businessId: string) {
+  return (i: any) => ({
+    id: i.id,
+    businessId,
+    invoiceNumber: i.invoiceNumber,
+    customerId: i.customerId,
+    items: i.items,
+    subtotal: i.subtotal,
+    taxTotal: i.taxTotal,
+    total: i.total,
+    amountPaid: i.amountPaid,
+    dueDate: toDateOrNull(i.dueDate),
+    status: i.status || "DRAFT",
+    createdAt: toDate(i.createdAt),
+  });
+}
+function mapQuotation(businessId: string) {
+  return (q: any) => ({
+    id: q.id,
+    businessId,
+    quoteNumber: q.quoteNumber,
+    customerId: q.customerId ?? null,
+    items: q.items,
+    subtotal: q.subtotal,
+    taxTotal: q.taxTotal,
+    total: q.total,
+    validUntil: toDateOrNull(q.validUntil),
+    status: q.status || "DRAFT",
+    createdAt: toDate(q.createdAt),
+  });
+}
+ 
+const restoreSchema = z.object({
+  businessId: z.string(),
+  categories: z.array(z.record(z.any())).optional().default([]),
+  products: z.array(z.record(z.any())).optional().default([]),
+  suppliers: z.array(z.record(z.any())).optional().default([]),
+  customers: z.array(z.record(z.any())).optional().default([]),
+  terminals: z.array(z.record(z.any())).optional().default([]),
+  shifts: z.array(z.record(z.any())).optional().default([]),
+  purchases: z.array(z.record(z.any())).optional().default([]),
+  sales: z.array(z.record(z.any())).optional().default([]),
+  stockMovements: z.array(z.record(z.any())).optional().default([]),
+  expenses: z.array(z.record(z.any())).optional().default([]),
+  invoices: z.array(z.record(z.any())).optional().default([]),
+  quotations: z.array(z.record(z.any())).optional().default([]),
+  generatedAt: z.string().optional(),
+});
+ 
+/**
+ * Restores this business's data from a JSON file downloaded via GET
+ * /backup above. Owner-only, and deliberately narrow in what it touches:
+ *
+ *  - Business profile, license/plan, and staff accounts (including
+ *    passwords) are left completely alone — a backup never includes
+ *    password hashes, and overwriting the current plan/license from an old
+ *    snapshot would be its own kind of damage. Only operational data is
+ *    replaced: products, categories, customers, suppliers, sales,
+ *    purchases, expenses, invoices, quotations, shifts, cash movements,
+ *    stock movements, and terminals.
+ *  - The backup's businessId must match the signed-in business — this is a
+ *    multi-tenant system, so a backup can only ever be restored into the
+ *    same business it came from.
+ *  - Existing rows for every table above are deleted and replaced with the
+ *    backup's rows (same original IDs, so every relationship — sale items,
+ *    purchase items, laybuy payments, cash movements — reconnects exactly
+ *    as it was). This is a full point-in-time replace, not a merge: nothing
+ *    created after the backup was taken survives the restore.
+ *  - Everything runs inside one transaction, so a failure partway through
+ *    (e.g. a corrupted file) leaves the current data completely untouched
+ *    rather than half-replaced.
+ */
+dataToolsRouter.post(
+  "/restore",
+  requireRole("OWNER"),
+  asyncHandler(async (req, res) => {
+    const businessId = req.auth!.businessId;
+ 
+    if (!req.body || typeof req.body !== "object" || !("businessId" in req.body)) {
+      throw badRequest("That doesn't look like a Pula POS backup file.");
+    }
+    const data = restoreSchema.parse(req.body);
+    if (data.businessId !== businessId) {
+      throw badRequest("This backup belongs to a different business and can't be restored here.");
+    }
+ 
+    // Pre-flight check: every cashier/creator reference in the backup must
+    // resolve to a staff account that still exists in this business. Staff
+    // accounts are never hard-deleted in this app (only deactivated), so in
+    // practice this should always pass — but if it wouldn't, better to fail
+    // clearly before touching anything than mid-transaction.
+    const currentUsers = await prisma.user.findMany({ where: { businessId }, select: { id: true } });
+    const knownUserIds = new Set(currentUsers.map((u) => u.id));
+    const missingUserIds = new Set<string>();
+    for (const s of data.sales) if (s.cashierId && !knownUserIds.has(s.cashierId)) missingUserIds.add(s.cashierId);
+    for (const sh of data.shifts) {
+      if (sh.cashierId && !knownUserIds.has(sh.cashierId)) missingUserIds.add(sh.cashierId);
+      for (const cm of sh.cashMovements || []) {
+        if (cm.createdById && !knownUserIds.has(cm.createdById)) missingUserIds.add(cm.createdById);
+      }
+    }
+    if (missingUserIds.size) {
+      throw badRequest(
+        "This backup references staff accounts that no longer exist in this business — restore cancelled, nothing was changed."
+      );
+    }
+ 
+    try {
+      await prisma.$transaction(
+        async (tx) => {
+          // 1. Clear existing operational data — children before parents.
+          await tx.laybuyPayment.deleteMany({ where: { businessId } });
+          await tx.saleItem.deleteMany({ where: { sale: { businessId } } });
+          await tx.cashMovement.deleteMany({ where: { businessId } });
+          await tx.purchaseItem.deleteMany({ where: { purchase: { businessId } } });
+          await tx.stockMovement.deleteMany({ where: { businessId } });
+          await tx.sale.deleteMany({ where: { businessId } });
+          await tx.purchase.deleteMany({ where: { businessId } });
+          await tx.invoice.deleteMany({ where: { businessId } });
+          await tx.quotation.deleteMany({ where: { businessId } });
+          await tx.shift.deleteMany({ where: { businessId } });
+          await tx.terminal.deleteMany({ where: { businessId } });
+          await tx.customer.deleteMany({ where: { businessId } });
+          await tx.supplier.deleteMany({ where: { businessId } });
+          await tx.product.deleteMany({ where: { businessId } });
+          await tx.category.deleteMany({ where: { businessId } });
+          await tx.expense.deleteMany({ where: { businessId } });
+ 
+          // 2. Recreate from the backup — parents before children.
+          if (data.categories.length) {
+            await tx.category.createMany({ data: data.categories.map(mapCategory(businessId)), skipDuplicates: true });
+          }
+          if (data.products.length) {
+            await tx.product.createMany({ data: data.products.map(mapProduct(businessId)), skipDuplicates: true });
+          }
+          if (data.suppliers.length) {
+            await tx.supplier.createMany({ data: data.suppliers.map(mapSupplier(businessId)), skipDuplicates: true });
+          }
+          if (data.customers.length) {
+            await tx.customer.createMany({ data: data.customers.map(mapCustomer(businessId)), skipDuplicates: true });
+          }
+          if (data.terminals.length) {
+            await tx.terminal.createMany({ data: data.terminals.map(mapTerminal(businessId)), skipDuplicates: true });
+          }
+          if (data.shifts.length) {
+            await tx.shift.createMany({ data: data.shifts.map(mapShift(businessId)), skipDuplicates: true });
+          }
+ 
+          if (data.purchases.length) {
+            await tx.purchase.createMany({ data: data.purchases.map(mapPurchase(businessId)), skipDuplicates: true });
+            const purchaseItems = data.purchases.flatMap((p: any) => (p.items || []).map(mapPurchaseItem(p.id)));
+            if (purchaseItems.length) await tx.purchaseItem.createMany({ data: purchaseItems, skipDuplicates: true });
+          }
+ 
+          if (data.sales.length) {
+            await tx.sale.createMany({ data: data.sales.map(mapSale(businessId)), skipDuplicates: true });
+            const saleItems = data.sales.flatMap((s: any) => (s.items || []).map(mapSaleItem(s.id)));
+            if (saleItems.length) await tx.saleItem.createMany({ data: saleItems, skipDuplicates: true });
+            const laybuyPayments = data.sales.flatMap((s: any) =>
+              (s.laybuyPayments || []).map(mapLaybuyPayment(businessId, s.id))
+            );
+            if (laybuyPayments.length) await tx.laybuyPayment.createMany({ data: laybuyPayments, skipDuplicates: true });
+          }
+ 
+          if (data.shifts.length) {
+            const cashMovements = data.shifts.flatMap((s: any) =>
+              (s.cashMovements || []).map(mapCashMovement(businessId, s.id))
+            );
+            if (cashMovements.length) await tx.cashMovement.createMany({ data: cashMovements, skipDuplicates: true });
+          }
+ 
+          if (data.stockMovements.length) {
+            await tx.stockMovement.createMany({ data: data.stockMovements.map(mapStockMovement(businessId)), skipDuplicates: true });
+          }
+          if (data.expenses.length) {
+            await tx.expense.createMany({ data: data.expenses.map(mapExpense(businessId)), skipDuplicates: true });
+          }
+          if (data.invoices.length) {
+            await tx.invoice.createMany({ data: data.invoices.map(mapInvoice(businessId)), skipDuplicates: true });
+          }
+          if (data.quotations.length) {
+            await tx.quotation.createMany({ data: data.quotations.map(mapQuotation(businessId)), skipDuplicates: true });
+          }
+        },
+        { timeout: 120_000, maxWait: 15_000 }
+      );
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("Restore failed:", err);
+      throw badRequest("Restore failed — nothing was changed. The file may be corrupted or from an incompatible version.");
+    }
+ 
+    res.json({
+      restoredFrom: data.generatedAt || null,
+      counts: {
+        categories: data.categories.length,
+        products: data.products.length,
+        suppliers: data.suppliers.length,
+        customers: data.customers.length,
+        terminals: data.terminals.length,
+        shifts: data.shifts.length,
+        purchases: data.purchases.length,
+        sales: data.sales.length,
+        stockMovements: data.stockMovements.length,
+        expenses: data.expenses.length,
+        invoices: data.invoices.length,
+        quotations: data.quotations.length,
+      },
+    });
+  })
+);

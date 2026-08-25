@@ -121,7 +121,7 @@ export function PosPage() {
     setSuccess(null);
     setSubmitting(true);
     try {
-      const sale = await api.post<{ saleNumber: string; createdAt: string }>("/sales", {
+      const sale = await api.post<{ id: string; saleNumber: string; createdAt: string }>("/sales", {
         items: cart.map((l) => ({ productId: l.product.id, quantity: l.quantity, unitPrice: Number(l.product.sellPrice), discount: l.discount })),
         customerId: customerId || undefined,
         amountPaid: paid || totals.total,
@@ -132,6 +132,7 @@ export function PosPage() {
       // sale response doesn't include product names, and this data is only
       // needed for the receipt shown immediately after checkout.
       setReceiptSale({
+        id: sale.id,
         saleNumber: sale.saleNumber,
         createdAt: sale.createdAt,
         cashierName: user?.name || "",
@@ -282,7 +283,17 @@ export function PosPage() {
         </div>
       </div>
 
-      {receiptSale && <Receipt sale={receiptSale} onClose={() => setReceiptSale(null)} />}
+      {receiptSale && (
+        <Receipt
+          sale={receiptSale}
+          onClose={() => setReceiptSale(null)}
+          allowVoid
+          onVoided={() => {
+            setReceiptSale(null);
+            loadProducts();
+          }}
+        />
+      )}
     </div>
   );
 }

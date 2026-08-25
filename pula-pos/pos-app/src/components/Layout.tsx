@@ -3,29 +3,31 @@ import { NavLink, Outlet } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { LicenseBanner } from "./LicenseBanner";
 import { api } from "../lib/api";
+import type { PermissionSection } from "../lib/permissions";
 
-const NAV = [
-  { to: "/", label: "Dashboard", end: true },
+const NAV: { to: string; label: string; end?: boolean; section?: PermissionSection }[] = [
+  { to: "/", label: "Dashboard", end: true, section: "dashboard" },
   { to: "/pos", label: "Point of Sale" },
-  { to: "/products", label: "Products" },
-  { to: "/categories", label: "Categories" },
-  { to: "/stock", label: "Stock" },
-  { to: "/customers", label: "Customers" },
-  { to: "/suppliers", label: "Suppliers" },
-  { to: "/sales", label: "Sales" },
-  { to: "/purchases", label: "Purchases" },
-  { to: "/expenses", label: "Expenses" },
-  { to: "/invoices", label: "Invoices" },
-  { to: "/quotations", label: "Quotations" },
-  { to: "/shifts", label: "Shifts & Cash" },
-  { to: "/reports", label: "Reports" },
-  { to: "/staff", label: "Staff" },
-  { to: "/settings", label: "Settings" },
+  { to: "/products", label: "Products", section: "products" },
+  { to: "/categories", label: "Categories", section: "categories" },
+  { to: "/stock", label: "Stock", section: "stock" },
+  { to: "/customers", label: "Customers", section: "customers" },
+  { to: "/suppliers", label: "Suppliers", section: "suppliers" },
+  { to: "/sales", label: "Sales", section: "sales" },
+  { to: "/purchases", label: "Purchases", section: "purchases" },
+  { to: "/expenses", label: "Expenses", section: "expenses" },
+  { to: "/invoices", label: "Invoices", section: "invoices" },
+  { to: "/quotations", label: "Quotations", section: "quotations" },
+  { to: "/shifts", label: "Shifts & Cash", section: "shifts" },
+  { to: "/reports", label: "Reports", section: "reports" },
+  { to: "/staff", label: "Staff", section: "staff" },
+  { to: "/settings", label: "Settings", section: "settings" },
 ];
 
 export function Layout() {
-  const { user, business, logout } = useAuth();
+  const { user, business, logout, can } = useAuth();
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  const visibleNav = NAV.filter((item) => !item.section || can(item.section));
 
   useEffect(() => {
     // Lightweight own-profile fetch just for branding — logo isn't part of
@@ -44,7 +46,7 @@ export function Layout() {
           )}
         </div>
         <nav className="sidebar-nav">
-          {NAV.map((item) => (
+          {visibleNav.map((item) => (
             <NavLink key={item.to} to={item.to} end={item.end} className={({ isActive }) => (isActive ? "active" : "")}>
               {item.label}
             </NavLink>

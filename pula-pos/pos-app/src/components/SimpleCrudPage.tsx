@@ -54,8 +54,13 @@ export function SimpleCrudPage<T extends { id: string }>({ title, endpoint, fiel
   }
 
   async function submit() {
-    setLoading(true);
     setError(null);
+    const missing = fields.find((f) => f.required && !form[f.name]?.trim());
+    if (missing) {
+      setError(`${missing.label} is required`);
+      return;
+    }
+    setLoading(true);
     try {
       const payload: Record<string, unknown> = {};
       for (const f of fields) {

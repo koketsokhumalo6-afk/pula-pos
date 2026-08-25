@@ -20,6 +20,9 @@ interface Props<T extends { id: string }> {
   fields: FieldDef[];
   columns: ColumnDef<T>[];
   emptyLabel?: string;
+  /** Optional extra per-row actions column, rendered only when provided —
+   * other SimpleCrudPage users are unaffected. */
+  renderRowActions?: (row: T) => React.ReactNode;
 }
 
 /**
@@ -28,7 +31,7 @@ interface Props<T extends { id: string }> {
  * invoices, quotations, staff, …). Keeps every module genuinely wired to
  * the API instead of a static mockup.
  */
-export function SimpleCrudPage<T extends { id: string }>({ title, endpoint, fields, columns, emptyLabel }: Props<T>) {
+export function SimpleCrudPage<T extends { id: string }>({ title, endpoint, fields, columns, emptyLabel, renderRowActions }: Props<T>) {
   const [rows, setRows] = useState<T[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<Record<string, string>>({});
@@ -79,11 +82,17 @@ export function SimpleCrudPage<T extends { id: string }>({ title, endpoint, fiel
       <div className="card">
         <table>
           <thead>
-            <tr>{columns.map((c) => <th key={c.header}>{c.header}</th>)}</tr>
+            <tr>
+              {columns.map((c) => <th key={c.header}>{c.header}</th>)}
+              {renderRowActions && <th></th>}
+            </tr>
           </thead>
           <tbody>
             {rows.map((row) => (
-              <tr key={row.id}>{columns.map((c) => <td key={c.header}>{c.render(row)}</td>)}</tr>
+              <tr key={row.id}>
+                {columns.map((c) => <td key={c.header}>{c.render(row)}</td>)}
+                {renderRowActions && <td>{renderRowActions(row)}</td>}
+              </tr>
             ))}
           </tbody>
         </table>

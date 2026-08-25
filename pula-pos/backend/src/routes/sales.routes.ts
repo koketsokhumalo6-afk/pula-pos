@@ -1,10 +1,11 @@
 import { Router } from "express";
 import { z } from "zod";
+import bcrypt from "bcryptjs";
 import { prisma } from "../lib/prisma";
 import { asyncHandler } from "../utils/asyncHandler";
-import { requireBusinessAuth, requireRole } from "../middleware/auth";
+import { requireBusinessAuth } from "../middleware/auth";
 import { requireActiveLicense } from "../middleware/license";
-import { badRequest, notFound } from "../utils/errors";
+import { badRequest, notFound, forbidden } from "../utils/errors";
 
 export const salesRouter = Router();
 salesRouter.use(requireBusinessAuth);
@@ -160,21 +161,40 @@ salesRouter.post(
   })
 );
 
-const voidSchema = z.object({ reason: z.string().min(1) });
+const voidSchema = z.object({
+  reason: z.string().min(1),
+  approverEmail: z.string().email().optional(),
+  approverPassword: z.string().min(1).optional(),
+});
 
 /**
- * Voids a sale and restocks the items. Restricted to owner/admin/manager —
- * a cashier who could void their own sales could ring up a purchase, pocket
- * the cash, then void it to erase the record, so this is deliberately not
- * a cashier-level action.
+ * Voids a sale and restocks the items. Owner/admin/manager can void
+ * directly. A cashier can also trigger this — from the POS screen right
+ * after a sale, so they never need to hand over the terminal — but only by
+ * supplying a manager/admin/owner's own email + password, verified right
+ * here (the "manager override" pattern most POS systems use). Without a
+ * valid approval, a cashier who could void their own sales could ring one
+ * up, pocket the cash, then void it to erase the record.
  */
 salesRouter.post(
   "/:id/void",
-  requireRole("OWNER", "ADMIN", "MANAGER"),
   requireActiveLicense(),
   asyncHandler(async (req, res) => {
-    voidSchema.parse(req.body);
+    const data = voidSchema.parse(req.body);
     const businessId = req.auth!.businessId;
+
+    if (req.auth!.role === "CASHIER") {
+      if (!data.approverEmail || !data.approverPassword) {
+        throw forbidden("A manager, admin, or owner must approve this void.");
+      }
+      const approver = await prisma.user.findUnique({
+        where: { businessId_email: { businessId, email: data.approverEmail } },
+      });
+      const validRole = !!approver && approver.status === "ACTIVE" && ["OWNER", "ADMIN", "MANAGER"].includes(approver.role);
+      const validPassword = approver ? await bcrypt.compare(data.approverPassword, approver.passwordHash) : false;
+      if (!validRole || !validPassword) throw forbidden("That manager login couldn't be verified.");
+    }
+
     const sale = await prisma.sale.findFirst({ where: { id: req.params.id, businessId }, include: { items: true } });
     if (!sale) throw notFound();
     if (sale.status !== "COMPLETED") throw badRequest("Only completed sales can be voided");

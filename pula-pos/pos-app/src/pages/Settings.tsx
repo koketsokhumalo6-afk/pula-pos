@@ -3,6 +3,8 @@ import { Link } from "react-router-dom";
 import { api, ApiRequestError } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { resizeImageToDataUrl } from "../lib/image";
+import { downloadFile } from "../lib/download";
+import { parseCsv, csvRowsToObjects } from "../lib/csv";
 
 /* ------------------------------- Icons ---------------------------------- */
 /* Small hand-drawn line icons (no external icon library / dependency) so
@@ -52,12 +54,23 @@ function IconLock() {
   );
 }
 
-type Section = "business" | "users" | "terminals" | "security";
+function IconData() {
+  return (
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 3v12" />
+      <path d="M7.5 10.5L12 15l4.5-4.5" />
+      <path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15" />
+    </svg>
+  );
+}
+
+type Section = "business" | "users" | "terminals" | "data" | "security";
 
 const CARDS: { key: Section; label: string; blurb: string; icon: () => JSX.Element }[] = [
   { key: "business", label: "Business Profile", blurb: "Name, address, tax details", icon: IconBusiness },
   { key: "users", label: "Users & Roles", blurb: "Manage staff accounts", icon: IconUsers },
   { key: "terminals", label: "Terminals", blurb: "POS devices registered", icon: IconTerminal },
+  { key: "data", label: "Data Tools", blurb: "Import, export, backup", icon: IconData },
   { key: "security", label: "Password & Security", blurb: "Change your password", icon: IconLock },
 ];
 
@@ -98,6 +111,7 @@ export function SettingsPage() {
         {active === "business" && <BusinessProfileSection />}
         {active === "users" && <UsersSection />}
         {active === "terminals" && <TerminalsSection />}
+        {active === "data" && <DataToolsSection />}
         {active === "security" && <SecuritySection />}
       </div>
     </div>
@@ -359,6 +373,204 @@ function SecuritySection() {
       <button className="btn btn-primary" onClick={changePassword} disabled={saving} style={{ marginTop: 8 }}>
         {saving ? "Saving…" : "Change Password"}
       </button>
+    </div>
+  );
+}
+
+/* ------------------------------ Data Tools -------------------------------- */
+
+interface ImportResult {
+  created: number;
+  updated: number;
+  errors: { row: number; message: string }[];
+}
+
+function DataToolsSection() {
+  const { user, business } = useAuth();
+
+  const [exportingKey, setExportingKey] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  const [importFileName, setImportFileName] = useState("");
+  const [importRows, setImportRows] = useState<Record<string, string>[] | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<ImportResult | null>(null);
+
+  const [backingUp, setBackingUp] = useState(false);
+  const [backupError, setBackupError] = useState<string | null>(null);
+
+  const stamp = () => new Date().toISOString().slice(0, 10);
+
+  async function runExport(key: string, path: string, filename: string) {
+    setExportError(null);
+    setExportingKey(key);
+    try {
+      await downloadFile(path, filename);
+    } catch {
+      setExportError("Download failed — please try again.");
+    } finally {
+      setExportingKey(null);
+    }
+  }
+
+  function onFileSelected(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setImportError(null);
+    setImportResult(null);
+    setImportFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const rows = csvRowsToObjects(parseCsv(String(reader.result || "")));
+        if (!rows.length) {
+          setImportError("That file has no data rows.");
+          setImportRows(null);
+          return;
+        }
+        setImportRows(rows);
+      } catch {
+        setImportError("Couldn't read that file as CSV.");
+        setImportRows(null);
+      }
+    };
+    reader.onerror = () => setImportError("Couldn't read that file.");
+    reader.readAsText(file);
+  }
+
+  async function runImport() {
+    if (!importRows) return;
+    setImporting(true);
+    setImportError(null);
+    setImportResult(null);
+    try {
+      const payload = importRows.map((r) => ({
+        name: r.name || r.Name || "",
+        sku: r.sku || r.SKU || undefined,
+        barcode: r.barcode || r.Barcode || undefined,
+        category: r.category || r.Category || undefined,
+        unit: r.unit || r.Unit || undefined,
+        costPrice: r.costPrice ? Number(r.costPrice) : undefined,
+        sellPrice: Number(r.sellPrice || r.sellprice || r.SellPrice || 0),
+        taxRate: r.taxRate ? Number(r.taxRate) : undefined,
+        quantity: r.quantity ? Number(r.quantity) : undefined,
+        reorderLevel: r.reorderLevel ? Number(r.reorderLevel) : undefined,
+      }));
+      const result = await api.post<ImportResult>("/data-tools/import/products", { rows: payload });
+      setImportResult(result);
+      setImportRows(null);
+      setImportFileName("");
+    } catch (err) {
+      setImportError(err instanceof ApiRequestError ? err.message : "Import failed");
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  async function runBackup() {
+    setBackupError(null);
+    setBackingUp(true);
+    try {
+      await downloadFile("/data-tools/backup", `pula-pos-backup-${stamp()}.json`);
+    } catch {
+      setBackupError("Backup download failed — please try again.");
+    } finally {
+      setBackingUp(false);
+    }
+  }
+
+  const exportBtn = (key: string, label: string, path: string, filename: string) => (
+    <button
+      key={key}
+      className="btn btn-secondary btn-sm"
+      onClick={() => runExport(key, path, filename)}
+      disabled={exportingKey === key}
+      style={{ marginRight: 8, marginBottom: 8 }}
+    >
+      {exportingKey === key ? "Preparing…" : `Export ${label}`}
+    </button>
+  );
+
+  return (
+    <div className="card" style={{ maxWidth: 640 }}>
+      <h3 style={{ marginTop: 0 }}>Data Tools</h3>
+
+      <div style={{ marginBottom: 22 }}>
+        <h4 style={{ marginBottom: 6 }}>Export</h4>
+        <p className="muted" style={{ marginTop: 0, marginBottom: 10 }}>
+          Download your data as CSV files — for accounting, spreadsheet work, or your own records.
+        </p>
+        <div>
+          {exportBtn("products", "Products", "/data-tools/export/products.csv", `products-${stamp()}.csv`)}
+          {exportBtn("sales", "Sales", "/data-tools/export/sales.csv", `sales-${stamp()}.csv`)}
+          {exportBtn("customers", "Customers", "/data-tools/export/customers.csv", `customers-${stamp()}.csv`)}
+          {exportBtn("suppliers", "Suppliers", "/data-tools/export/suppliers.csv", `suppliers-${stamp()}.csv`)}
+          {exportBtn("purchases", "Purchases", "/data-tools/export/purchases.csv", `purchases-${stamp()}.csv`)}
+        </div>
+        {exportError && <div className="error-text">{exportError}</div>}
+      </div>
+
+      <div style={{ marginBottom: 22, borderTop: "1px solid var(--border)", paddingTop: 18 }}>
+        <h4 style={{ marginBottom: 6 }}>Import Products</h4>
+        <p className="muted" style={{ marginTop: 0, marginBottom: 10 }}>
+          Upload a CSV to bulk-add products, or update existing ones by matching SKU. Columns:{" "}
+          <code>name, sku, barcode, category, unit, costPrice, sellPrice, taxRate, quantity, reorderLevel</code> — only{" "}
+          <code>name</code> and <code>sellPrice</code> are required. Updating an existing SKU changes its details but never
+          its stock quantity — use Stock adjustments for that, so every change stays in the audit trail.
+        </p>
+        <input type="file" accept=".csv,text/csv" onChange={onFileSelected} />
+        {importFileName && importRows && (
+          <p className="muted" style={{ marginTop: 8 }}>
+            {importFileName}: {importRows.length} row{importRows.length === 1 ? "" : "s"} ready to import.
+          </p>
+        )}
+        {importRows && (
+          <button className="btn btn-primary btn-sm" onClick={runImport} disabled={importing} style={{ marginTop: 4 }}>
+            {importing ? "Importing…" : `Import ${importRows.length} Product${importRows.length === 1 ? "" : "s"}`}
+          </button>
+        )}
+        {importError && <div className="error-text">{importError}</div>}
+        {importResult && (
+          <div style={{ marginTop: 10, fontSize: 13 }}>
+            <div style={{ color: "#146c43" }}>
+              {importResult.created} created, {importResult.updated} updated.
+            </div>
+            {importResult.errors.length > 0 && (
+              <div className="error-text" style={{ marginTop: 6 }}>
+                {importResult.errors.length} row{importResult.errors.length === 1 ? "" : "s"} skipped:
+                <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
+                  {importResult.errors.slice(0, 10).map((e, i) => (
+                    <li key={i}>
+                      Row {e.row}: {e.message}
+                    </li>
+                  ))}
+                </ul>
+                {importResult.errors.length > 10 && <div>…and {importResult.errors.length - 10} more.</div>}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div style={{ borderTop: "1px solid var(--border)", paddingTop: 18 }}>
+        <h4 style={{ marginBottom: 6 }}>Backup</h4>
+        <p className="muted" style={{ marginTop: 0, marginBottom: 10 }}>
+          Download a full snapshot of {business?.name || "your business"}'s data as a single file — keep it somewhere safe.
+          If you ever need it restored, send it to support and it'll be restored directly.
+        </p>
+        {user?.role === "OWNER" ? (
+          <>
+            <button className="btn btn-secondary btn-sm" onClick={runBackup} disabled={backingUp}>
+              {backingUp ? "Preparing…" : "Download Full Backup"}
+            </button>
+            {backupError && <div className="error-text">{backupError}</div>}
+          </>
+        ) : (
+          <p className="muted">Only the business owner can download a full backup.</p>
+        )}
+      </div>
     </div>
   );
 }

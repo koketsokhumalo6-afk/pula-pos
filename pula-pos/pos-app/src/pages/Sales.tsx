@@ -1,9 +1,15 @@
 import { useEffect, useState } from "react";
-import { api } from "../lib/api";
+import { api, ApiRequestError } from "../lib/api";
 import { money, dateTime } from "../lib/format";
 import { useAuth } from "../context/AuthContext";
 import { Receipt } from "../components/Receipt";
 import type { ReceiptData } from "../lib/receipt";
+
+// Voiding a sale erases its effect on the books and restocks the items — a
+// cashier who could void their own sales could ring one up, pocket the
+// cash, then void it to cover the shortfall. So it's owner/admin/manager
+// only, matching the backend's requireRole check on POST /sales/:id/void.
+const CAN_VOID_ROLES = ["OWNER", "ADMIN", "MANAGER"];
 
 interface Sale {
   id: string;
@@ -33,14 +39,43 @@ interface SaleDetail {
 }
 
 export function SalesPage() {
-  const { business } = useAuth();
+  const { business, user } = useAuth();
+  const canVoid = !!user && CAN_VOID_ROLES.includes(user.role);
   const [sales, setSales] = useState<Sale[]>([]);
   const [receiptSale, setReceiptSale] = useState<ReceiptData | null>(null);
   const [loadingReceiptId, setLoadingReceiptId] = useState<string | null>(null);
 
-  useEffect(() => {
+  const [voiding, setVoiding] = useState<Sale | null>(null);
+  const [voidReason, setVoidReason] = useState("");
+  const [voidError, setVoidError] = useState<string | null>(null);
+  const [voidSubmitting, setVoidSubmitting] = useState(false);
+
+  useEffect(() => { load(); }, []);
+  function load() {
     api.get<Sale[]>("/sales").then(setSales).catch(() => {});
-  }, []);
+  }
+
+  function openVoid(s: Sale) {
+    setVoiding(s);
+    setVoidReason("");
+    setVoidError(null);
+  }
+
+  async function submitVoid() {
+    if (!voiding) return;
+    if (!voidReason.trim()) { setVoidError("A reason is required"); return; }
+    setVoidError(null);
+    setVoidSubmitting(true);
+    try {
+      await api.post(`/sales/${voiding.id}/void`, { reason: voidReason.trim() });
+      setVoiding(null);
+      load();
+    } catch (err) {
+      setVoidError(err instanceof ApiRequestError ? err.message : "Failed to void sale");
+    } finally {
+      setVoidSubmitting(false);
+    }
+  }
 
   async function viewReceipt(id: string) {
     setLoadingReceiptId(id);
@@ -93,7 +128,10 @@ export function SalesPage() {
                 <td>
                   <button className="btn btn-secondary btn-sm" onClick={() => viewReceipt(s.id)} disabled={loadingReceiptId === s.id}>
                     {loadingReceiptId === s.id ? "Loading…" : "Receipt"}
-                  </button>
+                  </button>{" "}
+                  {canVoid && s.status === "COMPLETED" && (
+                    <button className="btn btn-danger btn-sm" onClick={() => openVoid(s)}>Void</button>
+                  )}
                 </td>
               </tr>
             ))}
@@ -103,6 +141,28 @@ export function SalesPage() {
       </div>
 
       {receiptSale && <Receipt sale={receiptSale} onClose={() => setReceiptSale(null)} />}
+
+      {voiding && (
+        <div className="modal-overlay" onClick={() => setVoiding(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Void sale {voiding.saleNumber}</h3>
+            <p className="muted" style={{ marginTop: -6 }}>
+              This restocks the items and marks the sale voided. It can't be undone.
+            </p>
+            <div className="field">
+              <label>Reason *</label>
+              <input value={voidReason} onChange={(e) => setVoidReason(e.target.value)} placeholder="e.g. entered by mistake, customer walked away" />
+            </div>
+            {voidError && <div className="error-text">{voidError}</div>}
+            <div className="gap-8" style={{ marginTop: 10 }}>
+              <button className="btn btn-danger" onClick={submitVoid} disabled={voidSubmitting}>
+                {voidSubmitting ? "Voiding…" : "Void Sale"}
+              </button>
+              <button className="btn btn-secondary" onClick={() => setVoiding(null)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

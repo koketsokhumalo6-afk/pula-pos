@@ -82,6 +82,7 @@ export function SalesPage() {
     try {
       const sale = await api.get<SaleDetail>(`/sales/${id}`);
       setReceiptSale({
+        id,
         saleNumber: sale.saleNumber,
         createdAt: sale.createdAt,
         cashierName: sale.cashier?.name || "",
